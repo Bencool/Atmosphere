@@ -22,22 +22,32 @@ namespace ams::kern {
         /* Most fields have already been cleared by our constructor. */
 
         /* Initial processes may run on all cores. */
-        this->core_mask = (1ul << cpu::NumCores) - 1;
+        m_core_mask = cpu::VirtualCoreMask;
 
         /* Initial processes may use any user priority they like. */
-        this->priority_mask = ~0xFul;
+        m_priority_mask = ~0xFul;
 
-        /* TODO: Here, Nintendo sets the kernel version to (current kernel version). */
-        /* How should we handle this? Not a MESOSPHERE_TODO because it's not critical. */
+        /* Here, Nintendo sets the kernel version to the current kernel version. */
+        /* We will follow suit and set the version to the highest supported kernel version. */
+        m_intended_kernel_version.Set<KernelVersion::MajorVersion>(ams::svc::SupportedKernelMajorVersion);
+        m_intended_kernel_version.Set<KernelVersion::MinorVersion>(ams::svc::SupportedKernelMinorVersion);
 
         /* Parse the capabilities array. */
         return this->SetCapabilities(caps, num_caps, page_table);
     }
 
+     Result KCapabilities::Initialize(svc::KUserPointer<const u32 *> user_caps, s32 num_caps, KProcessPageTable *page_table) {
+        /* We're initializing a user process. */
+        /* Most fields have already been cleared by our constructor. */
+
+        /* Parse the user capabilities array. */
+        return this->SetCapabilities(user_caps, num_caps, page_table);
+     }
+
     Result KCapabilities::SetCorePriorityCapability(const util::BitPack32 cap) {
         /* We can't set core/priority if we've already set them. */
-        R_UNLESS(this->core_mask    == 0,  svc::ResultInvalidArgument());
-        R_UNLESS(this->priority_mask == 0, svc::ResultInvalidArgument());
+        R_UNLESS(m_core_mask    == 0,  svc::ResultInvalidArgument());
+        R_UNLESS(m_priority_mask == 0, svc::ResultInvalidArgument());
 
         /* Validate the core/priority. */
         const auto min_core = cap.Get<CorePriority::MinimumCoreId>();
@@ -45,27 +55,26 @@ namespace ams::kern {
         const auto max_prio  = cap.Get<CorePriority::LowestThreadPriority>();
         const auto min_prio  = cap.Get<CorePriority::HighestThreadPriority>();
 
-        R_UNLESS(min_core <= max_core,       svc::ResultInvalidCombination());
-        R_UNLESS(min_prio <= max_prio,       svc::ResultInvalidCombination());
-        R_UNLESS(max_core <  cpu::NumCores,  svc::ResultInvalidCoreId());
+        R_UNLESS(min_core <= max_core,             svc::ResultInvalidCombination());
+        R_UNLESS(min_prio <= max_prio,             svc::ResultInvalidCombination());
+        R_UNLESS(max_core <  cpu::NumVirtualCores, svc::ResultInvalidCoreId());
 
-        MESOSPHERE_ASSERT(max_core < BITSIZEOF(u64));
         MESOSPHERE_ASSERT(max_prio < BITSIZEOF(u64));
 
         /* Set core mask. */
         for (auto core_id = min_core; core_id <= max_core; core_id++) {
-            this->core_mask |= (1ul << core_id);
+            m_core_mask |= (1ul << core_id);
         }
-        MESOSPHERE_ASSERT((this->core_mask & ((1ul << cpu::NumCores) - 1)) == this->core_mask);
+        MESOSPHERE_ASSERT((m_core_mask & cpu::VirtualCoreMask) == m_core_mask);
 
         /* Set priority mask. */
         for (auto prio = min_prio; prio <= max_prio; prio++) {
-            this->priority_mask |= (1ul << prio);
+            m_priority_mask |= (1ul << prio);
         }
 
         /* We must have some core/priority we can use. */
-        R_UNLESS(this->core_mask     != 0, svc::ResultInvalidArgument());
-        R_UNLESS(this->priority_mask != 0, svc::ResultInvalidArgument());
+        R_UNLESS(m_core_mask     != 0, svc::ResultInvalidArgument());
+        R_UNLESS(m_priority_mask != 0, svc::ResultInvalidArgument());
 
         return ResultSuccess();
     }
@@ -149,6 +158,7 @@ namespace ams::kern {
                 case RegionType::OnMemoryBootImage:
                 case RegionType::DTB:
                     R_TRY(page_table->MapRegion(MemoryRegions[static_cast<u32>(type)], perm));
+                    break;
                 default:
                     return svc::ResultNotFound();
             }
@@ -164,7 +174,7 @@ namespace ams::kern {
         for (size_t i = 0; i < util::size(ids); i++) {
             if (ids[i] != PaddingInterruptId) {
                 R_UNLESS(Kernel::GetInterruptManager().IsInterruptDefined(ids[i]), svc::ResultOutOfRange());
-                R_UNLESS(this->SetInterruptAllowed(ids[i]),                        svc::ResultOutOfRange());
+                R_UNLESS(this->SetInterruptPermitted(ids[i]),                      svc::ResultOutOfRange());
             }
         }
 
@@ -175,17 +185,17 @@ namespace ams::kern {
         /* Validate. */
         R_UNLESS(cap.Get<ProgramType::Reserved>() == 0, svc::ResultReservedUsed());
 
-        this->program_type = cap.Get<ProgramType::Type>();
+        m_program_type = cap.Get<ProgramType::Type>();
         return ResultSuccess();
     }
 
     Result KCapabilities::SetKernelVersionCapability(const util::BitPack32 cap) {
         /* Ensure we haven't set our version before. */
-        R_UNLESS(this->intended_kernel_version.Get<KernelVersion::MajorVersion>() == 0, svc::ResultInvalidArgument());
+        R_UNLESS(m_intended_kernel_version.Get<KernelVersion::MajorVersion>() == 0, svc::ResultInvalidArgument());
 
         /* Set, ensure that we set a valid version. */
-        this->intended_kernel_version = cap;
-        R_UNLESS(this->intended_kernel_version.Get<KernelVersion::MajorVersion>() != 0, svc::ResultInvalidArgument());
+        m_intended_kernel_version = cap;
+        R_UNLESS(m_intended_kernel_version.Get<KernelVersion::MajorVersion>() != 0, svc::ResultInvalidArgument());
 
         return ResultSuccess();
     }
@@ -194,7 +204,7 @@ namespace ams::kern {
         /* Validate. */
         R_UNLESS(cap.Get<HandleTable::Reserved>() == 0, svc::ResultReservedUsed());
 
-        this->handle_table_size = cap.Get<HandleTable::Size>();
+        m_handle_table_size = cap.Get<HandleTable::Size>();
         return ResultSuccess();
     }
 
@@ -202,8 +212,8 @@ namespace ams::kern {
         /* Validate. */
         R_UNLESS(cap.Get<DebugFlags::Reserved>() == 0, svc::ResultReservedUsed());
 
-        this->debug_capabilities.Set<DebugFlags::AllowDebug>(cap.Get<DebugFlags::AllowDebug>());
-        this->debug_capabilities.Set<DebugFlags::ForceDebug>(cap.Get<DebugFlags::ForceDebug>());
+        m_debug_capabilities.Set<DebugFlags::AllowDebug>(cap.Get<DebugFlags::AllowDebug>());
+        m_debug_capabilities.Set<DebugFlags::ForceDebug>(cap.Get<DebugFlags::ForceDebug>());
         return ResultSuccess();
     }
 
@@ -246,6 +256,37 @@ namespace ams::kern {
 
                 /* Check the pair cap is a map range cap. */
                 const util::BitPack32 size_cap = { caps[i] };
+                R_UNLESS(GetCapabilityType(size_cap) == CapabilityType::MapRange, svc::ResultInvalidCombination());
+
+                /* Map the range. */
+                R_TRY(this->MapRange(cap, size_cap, page_table));
+            } else {
+                R_TRY(this->SetCapability(cap, set_flags, set_svc, page_table));
+            }
+        }
+
+        return ResultSuccess();
+    }
+
+    Result KCapabilities::SetCapabilities(svc::KUserPointer<const u32 *> user_caps, s32 num_caps, KProcessPageTable *page_table) {
+        u32 set_flags = 0, set_svc = 0;
+
+        for (s32 i = 0; i < num_caps; i++) {
+            /* Read the cap from userspace. */
+            u32 cap0;
+            R_TRY(user_caps.CopyArrayElementTo(std::addressof(cap0), i));
+
+            const util::BitPack32 cap = { cap0 };
+            if (GetCapabilityType(cap) == CapabilityType::MapRange) {
+                /* Check that the pair cap exists. */
+                R_UNLESS((++i) < num_caps, svc::ResultInvalidCombination());
+
+                /* Read the second cap from userspace. */
+                u32 cap1;
+                R_TRY(user_caps.CopyArrayElementTo(std::addressof(cap1), i));
+
+                /* Check the pair cap is a map range cap. */
+                const util::BitPack32 size_cap = { cap1 };
                 R_UNLESS(GetCapabilityType(size_cap) == CapabilityType::MapRange, svc::ResultInvalidCombination());
 
                 /* Map the range. */

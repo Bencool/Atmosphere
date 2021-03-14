@@ -23,23 +23,26 @@ namespace ams::kern {
 
     class KLightLock {
         private:
-            std::atomic<uintptr_t> tag;
+            std::atomic<uintptr_t> m_tag;
         public:
-            constexpr KLightLock() : tag(0) { /* ... */ }
+            constexpr KLightLock() : m_tag(0) { /* ... */ }
 
             void Lock() {
                 MESOSPHERE_ASSERT_THIS();
 
                 const uintptr_t cur_thread = reinterpret_cast<uintptr_t>(GetCurrentThreadPointer());
+                const uintptr_t cur_thread_tag = (cur_thread | 1);
 
                 while (true) {
-                    uintptr_t old_tag = this->tag.load(std::memory_order_relaxed);
+                    uintptr_t old_tag = m_tag.load(std::memory_order_relaxed);
 
-                    while (!this->tag.compare_exchange_weak(old_tag, (old_tag == 0) ? cur_thread : old_tag | 1, std::memory_order_acquire)) {
-                         /* ... */
+                    while (!m_tag.compare_exchange_weak(old_tag, (old_tag == 0) ? cur_thread : old_tag | 1, std::memory_order_acquire)) {
+                        if ((old_tag | 1) == cur_thread_tag) {
+                            return;
+                        }
                     }
 
-                    if ((old_tag == 0) || ((old_tag | 1) == (cur_thread | 1))) {
+                    if ((old_tag == 0) || ((old_tag | 1) == cur_thread_tag)) {
                         break;
                     }
 
@@ -47,21 +50,23 @@ namespace ams::kern {
                 }
             }
 
-            void Unlock() {
+            ALWAYS_INLINE void Unlock() {
                 MESOSPHERE_ASSERT_THIS();
 
                 const uintptr_t cur_thread = reinterpret_cast<uintptr_t>(GetCurrentThreadPointer());
                 uintptr_t expected = cur_thread;
-                if (!this->tag.compare_exchange_weak(expected, 0, std::memory_order_release)) {
-                    this->UnlockSlowPath(cur_thread);
-                }
+                do {
+                    if (expected != cur_thread) {
+                        return this->UnlockSlowPath(cur_thread);
+                    }
+                } while (!m_tag.compare_exchange_weak(expected, 0, std::memory_order_release));
             }
 
             void LockSlowPath(uintptr_t owner, uintptr_t cur_thread);
             void UnlockSlowPath(uintptr_t cur_thread);
 
-            bool IsLocked() const { return this->tag != 0; }
-            bool IsLockedByCurrentThread() const { return (this->tag | 0x1ul) == (reinterpret_cast<uintptr_t>(GetCurrentThreadPointer()) | 0x1ul); }
+            ALWAYS_INLINE bool IsLocked() const { return m_tag.load() != 0; }
+            ALWAYS_INLINE bool IsLockedByCurrentThread() const { return (m_tag.load() | 0x1ul) == (reinterpret_cast<uintptr_t>(GetCurrentThreadPointer()) | 0x1ul); }
     };
 
     using KScopedLightLock = KScopedLock<KLightLock>;

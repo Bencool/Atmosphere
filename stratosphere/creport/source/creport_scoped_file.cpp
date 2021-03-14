@@ -13,6 +13,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+#include <stratosphere.hpp>
 #include "creport_scoped_file.hpp"
 
 namespace ams::creport {
@@ -22,7 +23,7 @@ namespace ams::creport {
         /* Convenience definitions. */
         constexpr size_t MaximumLineLength = 0x20;
 
-        os::Mutex g_format_lock;
+        os::Mutex g_format_lock(false);
         char g_format_buffer[2 * os::MemoryPageSize];
 
     }
@@ -39,7 +40,7 @@ namespace ams::creport {
         {
             std::va_list vl;
             va_start(vl, fmt);
-            std::vsnprintf(g_format_buffer, sizeof(g_format_buffer), fmt, vl);
+            util::VSNPrintf(g_format_buffer, sizeof(g_format_buffer), fmt, vl);
             va_end(vl);
         }
 
@@ -69,7 +70,7 @@ namespace ams::creport {
             {
                 char hex[MaximumLineLength * 2 + 2] = {};
                 for (size_t i = 0; i < cur_size; i++) {
-                    std::snprintf(hex + i * 2, 3, "%02X", data_u8[data_ofs++]);
+                    util::SNPrintf(hex + i * 2, 3, "%02X", data_u8[data_ofs++]);
                 }
                 hex[cur_size * 2 + 0] = '\n';
                 hex[cur_size * 2 + 1] = '\x00';

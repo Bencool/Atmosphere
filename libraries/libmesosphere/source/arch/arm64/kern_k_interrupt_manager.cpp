@@ -17,24 +17,102 @@
 
 namespace ams::kern::arch::arm64 {
 
-    /* Instantiate static members in specific translation unit. */
-    KSpinLock KInterruptManager::s_lock;
-    std::array<KInterruptManager::KGlobalInterruptEntry, KInterruptController::NumGlobalInterrupts> KInterruptManager::s_global_interrupts;
-    KInterruptController::GlobalState KInterruptManager::s_global_state;
-    bool KInterruptManager::s_global_state_saved;
-
     void KInterruptManager::Initialize(s32 core_id) {
-        this->interrupt_controller.Initialize(core_id);
+        m_interrupt_controller.Initialize(core_id);
     }
 
     void KInterruptManager::Finalize(s32 core_id) {
-        this->interrupt_controller.Finalize(core_id);
+        m_interrupt_controller.Finalize(core_id);
+    }
+
+    void KInterruptManager::Save(s32 core_id) {
+        /* Verify core id. */
+        MESOSPHERE_ASSERT(core_id == GetCurrentCoreId());
+
+        /* Ensure all cores get to this point before continuing. */
+        cpu::SynchronizeAllCores();
+
+        /* If on core 0, save the global interrupts. */
+        if (core_id == 0) {
+            MESOSPHERE_ABORT_UNLESS(!m_global_state_saved);
+            m_interrupt_controller.SaveGlobal(std::addressof(m_global_state));
+            m_global_state_saved = true;
+        }
+
+        /* Ensure all cores get to this point before continuing. */
+        cpu::SynchronizeAllCores();
+
+        /* Save all local interrupts. */
+        MESOSPHERE_ABORT_UNLESS(!m_local_state_saved[core_id]);
+        m_interrupt_controller.SaveCoreLocal(std::addressof(m_local_states[core_id]));
+        m_local_state_saved[core_id] = true;
+
+        /* Ensure all cores get to this point before continuing. */
+        cpu::SynchronizeAllCores();
+
+        /* Finalize all cores other than core 0. */
+        if (core_id != 0) {
+            this->Finalize(core_id);
+        }
+
+        /* Ensure all cores get to this point before continuing. */
+        cpu::SynchronizeAllCores();
+
+        /* Finalize core 0. */
+        if (core_id == 0) {
+            this->Finalize(core_id);
+        }
+    }
+
+    void KInterruptManager::Restore(s32 core_id) {
+        /* Verify core id. */
+        MESOSPHERE_ASSERT(core_id == GetCurrentCoreId());
+
+        /* Ensure all cores get to this point before continuing. */
+        cpu::SynchronizeAllCores();
+
+        /* Initialize core 0. */
+        if (core_id == 0) {
+            this->Initialize(core_id);
+        }
+
+        /* Ensure all cores get to this point before continuing. */
+        cpu::SynchronizeAllCores();
+
+        /* Initialize all cores other than core 0. */
+        if (core_id != 0) {
+            this->Initialize(core_id);
+        }
+
+        /* Ensure all cores get to this point before continuing. */
+        cpu::SynchronizeAllCores();
+
+        /* Restore all local interrupts. */
+        MESOSPHERE_ASSERT(m_local_state_saved[core_id]);
+        m_interrupt_controller.RestoreCoreLocal(std::addressof(m_local_states[core_id]));
+        m_local_state_saved[core_id] = false;
+
+        /* Ensure all cores get to this point before continuing. */
+        cpu::SynchronizeAllCores();
+
+        /* If on core 0, restore the global interrupts. */
+        if (core_id == 0) {
+            MESOSPHERE_ASSERT(m_global_state_saved);
+            m_interrupt_controller.RestoreGlobal(std::addressof(m_global_state));
+            m_global_state_saved = false;
+        }
+
+        /* Ensure all cores get to this point before continuing. */
+        cpu::SynchronizeAllCores();
     }
 
     bool KInterruptManager::OnHandleInterrupt() {
         /* Get the interrupt id. */
-        const u32 raw_irq = this->interrupt_controller.GetIrq();
+        const u32 raw_irq = m_interrupt_controller.GetIrq();
         const s32 irq = KInterruptController::ConvertRawIrq(raw_irq);
+
+        /* Trace the interrupt. */
+        MESOSPHERE_KTRACE_INTERRUPT(irq);
 
         /* If the IRQ is spurious, we don't need to reschedule. */
         if (irq < 0) {
@@ -48,7 +126,7 @@ namespace ams::kern::arch::arm64 {
             if (entry.handler != nullptr) {
                 /* Set manual clear needed if relevant. */
                 if (entry.manually_cleared) {
-                    this->interrupt_controller.SetPriorityLevel(irq, KInterruptController::PriorityLevel_Low);
+                    m_interrupt_controller.SetPriorityLevel(irq, KInterruptController::PriorityLevel_Low);
                     entry.needs_clear = true;
                 }
 
@@ -58,14 +136,14 @@ namespace ams::kern::arch::arm64 {
                 MESOSPHERE_LOG("Core%d: Unhandled local interrupt %d\n", GetCurrentCoreId(), irq);
             }
         } else if (KInterruptController::IsGlobal(irq)) {
-            KScopedSpinLock lk(GetLock());
+            KScopedSpinLock lk(this->GetGlobalInterruptLock());
 
             /* Get global interrupt entry. */
             auto &entry = GetGlobalInterruptEntry(irq);
             if (entry.handler != nullptr) {
                 /* Set manual clear needed if relevant. */
                 if (entry.manually_cleared) {
-                    this->interrupt_controller.Disable(irq);
+                    m_interrupt_controller.Disable(irq);
                     entry.needs_clear = true;
                 }
 
@@ -79,7 +157,7 @@ namespace ams::kern::arch::arm64 {
         }
 
         /* Acknowledge the interrupt. */
-        this->interrupt_controller.EndOfInterrupt(raw_irq);
+        m_interrupt_controller.EndOfInterrupt(raw_irq);
 
         /* If we found no task, then we don't need to reschedule. */
         if (task == nullptr) {
@@ -100,15 +178,15 @@ namespace ams::kern::arch::arm64 {
 
         /* If we need scheduling, */
         if (needs_scheduling) {
-            /* Handle any changes needed to the user preemption state. */
-            if (user_mode && GetCurrentThread().GetUserPreemptionState() != 0 && GetCurrentProcess().GetPreemptionStatePinnedThread(GetCurrentCoreId()) == nullptr) {
+            /* If the user disable count is set, we may need to pin the current thread. */
+            if (user_mode && GetCurrentThread().GetUserDisableCount() != 0 && GetCurrentProcess().GetPinnedThread(GetCurrentCoreId()) == nullptr) {
                 KScopedSchedulerLock sl;
 
-                /* Note the preemption state in process. */
-                GetCurrentProcess().SetPreemptionState();
+                /* Pin the current thread. */
+                GetCurrentProcess().PinCurrentThread();
 
-                /* Set the kernel preemption state flag. */
-                GetCurrentThread().SetKernelPreemptionState(1);;
+                /* Set the interrupt flag for the thread. */
+                GetCurrentThread().SetInterruptFlag();
 
                 /* Request interrupt scheduling. */
                 Kernel::GetScheduler().RequestScheduleOnInterrupt();
@@ -130,12 +208,14 @@ namespace ams::kern::arch::arm64 {
     }
 
     Result KInterruptManager::BindHandler(KInterruptHandler *handler, s32 irq, s32 core_id, s32 priority, bool manual_clear, bool level) {
+        MESOSPHERE_UNUSED(core_id);
+
         R_UNLESS(KInterruptController::IsGlobal(irq) || KInterruptController::IsLocal(irq), svc::ResultOutOfRange());
 
         KScopedInterruptDisable di;
 
         if (KInterruptController::IsGlobal(irq)) {
-            KScopedSpinLock lk(GetLock());
+            KScopedSpinLock lk(this->GetGlobalInterruptLock());
             return this->BindGlobal(handler, irq, core_id, priority, manual_clear, level);
         } else {
             MESOSPHERE_ASSERT(core_id == GetCurrentCoreId());
@@ -144,12 +224,14 @@ namespace ams::kern::arch::arm64 {
     }
 
     Result KInterruptManager::UnbindHandler(s32 irq, s32 core_id) {
+        MESOSPHERE_UNUSED(core_id);
+
         R_UNLESS(KInterruptController::IsGlobal(irq) || KInterruptController::IsLocal(irq), svc::ResultOutOfRange());
 
         KScopedInterruptDisable di;
 
         if (KInterruptController::IsGlobal(irq)) {
-            KScopedSpinLock lk(GetLock());
+            KScopedSpinLock lk(this->GetGlobalInterruptLock());
             return this->UnbindGlobal(irq);
         } else {
             MESOSPHERE_ASSERT(core_id == GetCurrentCoreId());
@@ -161,17 +243,19 @@ namespace ams::kern::arch::arm64 {
         R_UNLESS(KInterruptController::IsGlobal(irq), svc::ResultOutOfRange());
 
         KScopedInterruptDisable di;
-        KScopedSpinLock lk(GetLock());
+        KScopedSpinLock lk(this->GetGlobalInterruptLock());
         return this->ClearGlobal(irq);
     }
 
     Result KInterruptManager::ClearInterrupt(s32 irq, s32 core_id) {
+        MESOSPHERE_UNUSED(core_id);
+
         R_UNLESS(KInterruptController::IsGlobal(irq) || KInterruptController::IsLocal(irq), svc::ResultOutOfRange());
 
         KScopedInterruptDisable di;
 
         if (KInterruptController::IsGlobal(irq)) {
-            KScopedSpinLock lk(GetLock());
+            KScopedSpinLock lk(this->GetGlobalInterruptLock());
             return this->ClearGlobal(irq);
         } else {
             MESOSPHERE_ASSERT(core_id == GetCurrentCoreId());
@@ -195,16 +279,16 @@ namespace ams::kern::arch::arm64 {
 
         /* Configure the interrupt as level or edge. */
         if (level) {
-            this->interrupt_controller.SetLevel(irq);
+            m_interrupt_controller.SetLevel(irq);
         } else {
-            this->interrupt_controller.SetEdge(irq);
+            m_interrupt_controller.SetEdge(irq);
         }
 
         /* Configure the interrupt. */
-        this->interrupt_controller.Clear(irq);
-        this->interrupt_controller.SetTarget(irq, core_id);
-        this->interrupt_controller.SetPriorityLevel(irq, priority);
-        this->interrupt_controller.Enable(irq);
+        m_interrupt_controller.Clear(irq);
+        m_interrupt_controller.SetTarget(irq, core_id);
+        m_interrupt_controller.SetPriorityLevel(irq, priority);
+        m_interrupt_controller.Enable(irq);
 
         return ResultSuccess();
     }
@@ -225,19 +309,19 @@ namespace ams::kern::arch::arm64 {
         entry.priority = static_cast<u8>(priority);
 
         /* Configure the interrupt. */
-        this->interrupt_controller.Clear(irq);
-        this->interrupt_controller.SetPriorityLevel(irq, priority);
-        this->interrupt_controller.Enable(irq);
+        m_interrupt_controller.Clear(irq);
+        m_interrupt_controller.SetPriorityLevel(irq, priority);
+        m_interrupt_controller.Enable(irq);
 
         return ResultSuccess();
     }
 
     Result KInterruptManager::UnbindGlobal(s32 irq) {
         for (size_t core_id = 0; core_id < cpu::NumCores; core_id++) {
-            this->interrupt_controller.ClearTarget(irq, static_cast<s32>(core_id));
+            m_interrupt_controller.ClearTarget(irq, static_cast<s32>(core_id));
         }
-        this->interrupt_controller.SetPriorityLevel(irq, KInterruptController::PriorityLevel_Low);
-        this->interrupt_controller.Disable(irq);
+        m_interrupt_controller.SetPriorityLevel(irq, KInterruptController::PriorityLevel_Low);
+        m_interrupt_controller.Disable(irq);
 
         GetGlobalInterruptEntry(irq).handler = nullptr;
 
@@ -248,8 +332,8 @@ namespace ams::kern::arch::arm64 {
         auto &entry = this->GetLocalInterruptEntry(irq);
         R_UNLESS(entry.handler != nullptr, svc::ResultInvalidState());
 
-        this->interrupt_controller.SetPriorityLevel(irq, KInterruptController::PriorityLevel_Low);
-        this->interrupt_controller.Disable(irq);
+        m_interrupt_controller.SetPriorityLevel(irq, KInterruptController::PriorityLevel_Low);
+        m_interrupt_controller.Disable(irq);
 
         entry.handler = nullptr;
 
@@ -267,7 +351,7 @@ namespace ams::kern::arch::arm64 {
 
         /* Clear and enable. */
         entry.needs_clear = false;
-        this->interrupt_controller.Enable(irq);
+        m_interrupt_controller.Enable(irq);
         return ResultSuccess();
     }
 
@@ -282,7 +366,7 @@ namespace ams::kern::arch::arm64 {
 
         /* Clear and set priority. */
         entry.needs_clear = false;
-        this->interrupt_controller.SetPriorityLevel(irq, entry.priority);
+        m_interrupt_controller.SetPriorityLevel(irq, entry.priority);
         return ResultSuccess();
     }
 

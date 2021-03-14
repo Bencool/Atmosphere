@@ -31,6 +31,8 @@ namespace ams::ldr {
     R_DEFINE_ERROR_RESULT(NotPinned,             8);
     R_DEFINE_ERROR_RESULT(InvalidProgramId,      9);
     R_DEFINE_ERROR_RESULT(InvalidVersion,        10);
+    R_DEFINE_ERROR_RESULT(InvalidAcidSignature,  11);
+    R_DEFINE_ERROR_RESULT(InvalidNcaSignature,   12);
 
     R_DEFINE_ERROR_RESULT(InsufficientAddressSpace,     51);
     R_DEFINE_ERROR_RESULT(InvalidNro,                   52);
@@ -52,6 +54,7 @@ namespace ams::ldr {
     R_DEFINE_ERROR_RESULT(InvalidCapabilitySyscallMask,     104);
     R_DEFINE_ERROR_RESULT(InvalidCapabilityMapRange,        106);
     R_DEFINE_ERROR_RESULT(InvalidCapabilityMapPage,         107);
+    R_DEFINE_ERROR_RESULT(InvalidCapabilityMapRegion,       110);
     R_DEFINE_ERROR_RESULT(InvalidCapabilityInterruptPair,   111);
     R_DEFINE_ERROR_RESULT(InvalidCapabilityApplicationType, 113);
     R_DEFINE_ERROR_RESULT(InvalidCapabilityKernelVersion,   114);

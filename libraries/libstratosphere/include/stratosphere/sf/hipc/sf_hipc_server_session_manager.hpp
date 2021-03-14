@@ -34,18 +34,17 @@ namespace ams::sf::hipc {
 
     namespace impl {
 
-        class HipcManager;
+        class HipcManagerImpl;
 
     }
 
-    class ServerSession : public os::WaitableHolder {
+    class ServerSession : public os::WaitableHolderType {
         friend class ServerSessionManager;
         friend class ServerManagerBase;
-        friend class impl::HipcManager;
+        friend class impl::HipcManagerImpl;
         NON_COPYABLE(ServerSession);
         NON_MOVEABLE(ServerSession);
         private:
-            util::IntrusiveListNode deferred_list_node;
             cmif::ServiceObjectHolder srv_obj_holder;
             cmif::PointerAndSize pointer_buffer;
             cmif::PointerAndSize saved_message;
@@ -54,14 +53,16 @@ namespace ams::sf::hipc {
             bool is_closed;
             bool has_received;
         public:
-            ServerSession(Handle h, cmif::ServiceObjectHolder &&obj) : WaitableHolder(h), srv_obj_holder(std::move(obj)), session_handle(h) {
+            ServerSession(Handle h, cmif::ServiceObjectHolder &&obj) : srv_obj_holder(std::move(obj)), session_handle(h) {
+                hipc::AttachWaitableHolderForReply(this, h);
                 this->is_closed = false;
                 this->has_received = false;
                 this->forward_service = nullptr;
                 AMS_ABORT_UNLESS(!this->IsMitmSession());
             }
 
-            ServerSession(Handle h, cmif::ServiceObjectHolder &&obj, std::shared_ptr<::Service> &&fsrv) : WaitableHolder(h), srv_obj_holder(std::move(obj)), session_handle(h) {
+            ServerSession(Handle h, cmif::ServiceObjectHolder &&obj, std::shared_ptr<::Service> &&fsrv) : srv_obj_holder(std::move(obj)), session_handle(h) {
+                hipc::AttachWaitableHolderForReply(this, h);
                 this->is_closed = false;
                 this->has_received = false;
                 this->forward_service = std::move(fsrv);
@@ -91,16 +92,13 @@ namespace ams::sf::hipc {
                 /* Allocate session. */
                 ServerSession *session_memory = this->AllocateSession();
                 R_UNLESS(session_memory != nullptr, sf::hipc::ResultOutOfSessionMemory());
+
                 /* Register session. */
-                bool succeeded = false;
-                ON_SCOPE_EXIT {
-                    if (!succeeded) {
-                        this->DestroySession(session_memory);
-                    }
-                };
+                auto register_guard = SCOPE_GUARD { this->DestroySession(session_memory); };
                 R_TRY(ctor(session_memory));
+
                 /* Save new session to output. */
-                succeeded = true;
+                register_guard.Cancel();
                 *out = session_memory;
                 return ResultSuccess();
             }
@@ -161,13 +159,13 @@ namespace ams::sf::hipc {
             Result RegisterMitmSession(Handle session_handle, cmif::ServiceObjectHolder &&obj, std::shared_ptr<::Service> &&fsrv);
             Result AcceptMitmSession(Handle mitm_port_handle, cmif::ServiceObjectHolder &&obj, std::shared_ptr<::Service> &&fsrv);
 
-            template<typename ServiceImpl>
-            Result AcceptSession(Handle port_handle, std::shared_ptr<ServiceImpl> obj) {
+            template<typename Interface>
+            Result AcceptSession(Handle port_handle, SharedPointer<Interface> obj) {
                 return this->AcceptSession(port_handle, cmif::ServiceObjectHolder(std::move(obj)));
             }
 
-            template<typename ServiceImpl>
-            Result AcceptMitmSession(Handle mitm_port_handle, std::shared_ptr<ServiceImpl> obj, std::shared_ptr<::Service> &&fsrv) {
+            template<typename Interface>
+            Result AcceptMitmSession(Handle mitm_port_handle, SharedPointer<Interface> obj, std::shared_ptr<::Service> &&fsrv) {
                 return this->AcceptMitmSession(mitm_port_handle, cmif::ServiceObjectHolder(std::move(obj)), std::forward<std::shared_ptr<::Service>>(fsrv));
             }
 

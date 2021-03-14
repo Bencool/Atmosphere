@@ -18,15 +18,21 @@
 
 #include "ns_shim.h"
 
+#define AMS_NS_DOCUMENT_MITM_INTERFACE_INFO(C, H)                                                                                                                                                                       \
+    AMS_SF_METHOD_INFO(C, H, 21, Result, GetApplicationContentPath,      (const sf::OutBuffer &out_path, ncm::ProgramId application_id, u8 content_type), (out_path, application_id, content_type))                     \
+    AMS_SF_METHOD_INFO(C, H, 23, Result, ResolveApplicationContentPath,  (ncm::ProgramId application_id, u8 content_type),                                (application_id, content_type))                               \
+    AMS_SF_METHOD_INFO(C, H, 92, Result, GetRunningApplicationProgramId, (sf::Out<ncm::ProgramId> out, ncm::ProgramId application_id),                    (out, application_id),                    hos::Version_6_0_0)
+
+AMS_SF_DEFINE_INTERFACE(ams::mitm::ns::impl, IDocumentInterface, AMS_NS_DOCUMENT_MITM_INTERFACE_INFO)
+
+#define AMS_NS_WEB_MITM_INTERFACE_INFO(C, H) \
+    AMS_SF_METHOD_INFO(C, H, 7999, Result, GetDocumentInterface, (sf::Out<sf::SharedPointer<mitm::ns::impl::IDocumentInterface>> out), (out))
+
+AMS_SF_DEFINE_MITM_INTERFACE(ams::mitm::ns::impl, IWebMitmInterface, AMS_NS_WEB_MITM_INTERFACE_INFO)
+
 namespace ams::mitm::ns {
 
-    class NsDocumentService : public sf::IServiceObject {
-        private:
-            enum class CommandId {
-                GetApplicationContentPath      = 21,
-                ResolveApplicationContentPath  = 23,
-                GetRunningApplicationProgramId = 92,
-            };
+    class NsDocumentService {
         private:
             sm::MitmProcessInfo client_info;
             std::unique_ptr<::NsDocumentInterface> srv;
@@ -36,24 +42,17 @@ namespace ams::mitm::ns {
             virtual ~NsDocumentService() {
                 nsDocumentInterfaceClose(this->srv.get());
             }
-        protected:
+        public:
             /* Actual command API. */
             Result GetApplicationContentPath(const sf::OutBuffer &out_path, ncm::ProgramId application_id, u8 content_type);
             Result ResolveApplicationContentPath(ncm::ProgramId application_id, u8 content_type);
             Result GetRunningApplicationProgramId(sf::Out<ncm::ProgramId> out, ncm::ProgramId application_id);
-        public:
-            DEFINE_SERVICE_DISPATCH_TABLE {
-                MAKE_SERVICE_COMMAND_META(GetApplicationContentPath),
-                MAKE_SERVICE_COMMAND_META(ResolveApplicationContentPath),
-                MAKE_SERVICE_COMMAND_META(GetRunningApplicationProgramId, hos::Version_600),
-            };
     };
+    static_assert(impl::IsIDocumentInterface<NsDocumentService>);
 
-    class NsWebMitmService  : public sf::IMitmServiceObject {
-        private:
-            enum class CommandId {
-                GetDocumentInterface = 7999,
-            };
+    class NsWebMitmService : public sf::MitmServiceImplBase {
+        public:
+            using MitmServiceImplBase::MitmServiceImplBase;
         public:
             static bool ShouldMitm(const sm::MitmProcessInfo &client_info) {
                 /* We will mitm:
@@ -62,13 +61,8 @@ namespace ams::mitm::ns {
                 return ncm::IsWebAppletId(client_info.program_id);
             }
         public:
-            SF_MITM_SERVICE_OBJECT_CTOR(NsWebMitmService) { /* ... */ }
-        protected:
-            Result GetDocumentInterface(sf::Out<std::shared_ptr<NsDocumentService>> out);
-        public:
-            DEFINE_SERVICE_DISPATCH_TABLE {
-                MAKE_SERVICE_COMMAND_META(GetDocumentInterface),
-            };
+            Result GetDocumentInterface(sf::Out<sf::SharedPointer<impl::IDocumentInterface>> out);
     };
+    static_assert(impl::IsIWebMitmInterface<NsWebMitmService>);
 
 }

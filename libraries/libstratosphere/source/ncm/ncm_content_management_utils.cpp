@@ -25,7 +25,7 @@ namespace ams::ncm {
         Result ConvertToFsCommonPath(char *dst, size_t dst_size, const char *package_root_path, const char *entry_path) {
             char package_path[MaxPackagePathLength];
 
-            const size_t path_len = std::snprintf(package_path, sizeof(package_path), "%s%s", package_root_path, entry_path);
+            const size_t path_len = util::SNPrintf(package_path, sizeof(package_path), "%s%s", package_root_path, entry_path);
             AMS_ABORT_UNLESS(path_len < MaxPackagePathLength);
 
             return fs::ConvertToFsCommonPath(dst, dst_size, package_path);
@@ -73,12 +73,11 @@ namespace ams::ncm {
 
         /* Allocate space to hold the converted meta. */
         const size_t meta_size = package_meta_reader.CalculateConvertContentMetaSize();
-        void *meta = std::malloc(meta_size);
-        ON_SCOPE_EXIT { std::free(meta); };
+        std::unique_ptr<char[]> meta(new (std::nothrow) char[meta_size]);
 
         /* Convert the meta from packaged form to normal form. */
-        package_meta_reader.ConvertToContentMeta(meta, meta_size, meta_info);
-        ncm::ContentMetaReader meta_reader(meta, meta_size);
+        package_meta_reader.ConvertToContentMeta(meta.get(), meta_size, meta_info);
+        ncm::ContentMetaReader meta_reader(meta.get(), meta_size);
 
         /* Insert the new metas into the database. */
         R_TRY(this->db->Set(package_meta_reader.GetKey(), meta_reader.GetData(), meta_reader.GetSize()));

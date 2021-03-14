@@ -13,8 +13,10 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+#include <stratosphere.hpp>
 #include "ldr_arguments.hpp"
 #include "ldr_content_management.hpp"
+#include "ldr_development_manager.hpp"
 #include "ldr_process_creation.hpp"
 #include "ldr_launch_record.hpp"
 #include "ldr_loader_service.hpp"
@@ -82,8 +84,12 @@ namespace ams::ldr {
         return ldr::ro::UnpinProgram(id);
     }
 
-    Result LoaderService::SetProgramArguments(ncm::ProgramId program_id, const sf::InPointerBuffer &args, u32 args_size) {
+    Result LoaderService::SetProgramArgumentsDeprecated(ncm::ProgramId program_id, const sf::InPointerBuffer &args, u32 args_size) {
         return args::Set(program_id, args.GetPointer(), std::min(args.GetSize(), size_t(args_size)));
+    }
+
+    Result LoaderService::SetProgramArguments(ncm::ProgramId program_id, const sf::InPointerBuffer &args) {
+        return args::Set(program_id, args.GetPointer(), args.GetSize());
     }
 
     Result LoaderService::FlushArguments() {
@@ -95,6 +101,11 @@ namespace ams::ldr {
         return ldr::ro::GetProcessModuleInfo(count.GetPointer(), out.GetPointer(), out.GetSize(), process_id);
     }
 
+    Result LoaderService::SetEnabledProgramVerification(bool enabled) {
+        ldr::SetEnabledProgramVerification(enabled);
+        return ResultSuccess();
+    }
+
     /* Atmosphere commands. */
     Result LoaderService::AtmosphereRegisterExternalCode(sf::OutMoveHandle out, ncm::ProgramId program_id) {
         return fssystem::CreateExternalCode(out.GetHandlePointer(), program_id);
@@ -104,8 +115,8 @@ namespace ams::ldr {
         fssystem::DestroyExternalCode(program_id);
     }
 
-    void LoaderService::AtmosphereHasLaunchedProgram(sf::Out<bool> out, ncm::ProgramId program_id) {
-        out.SetValue(ldr::HasLaunchedProgram(program_id));
+    void LoaderService::AtmosphereHasLaunchedBootProgram(sf::Out<bool> out, ncm::ProgramId program_id) {
+        out.SetValue(ldr::HasLaunchedBootProgram(program_id));
     }
 
     Result LoaderService::AtmosphereGetProgramInfo(sf::Out<ProgramInfo> out_program_info, sf::Out<cfg::OverrideStatus> out_status, const ncm::ProgramLocation &loc) {

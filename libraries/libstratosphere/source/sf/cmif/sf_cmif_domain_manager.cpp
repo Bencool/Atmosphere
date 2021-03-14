@@ -31,7 +31,7 @@ namespace ams::sf::cmif {
         }
     }
 
-    void ServerDomainManager::Domain::DestroySelf() {
+    void ServerDomainManager::Domain::DisposeImpl() {
         ServerDomainManager *manager = this->manager;
         this->~Domain();
         manager->FreeDomain(this);
@@ -106,7 +106,7 @@ namespace ams::sf::cmif {
         return entry->object.Clone();
     }
 
-    ServerDomainManager::EntryManager::EntryManager(DomainEntryStorage *entry_storage, size_t entry_count) {
+    ServerDomainManager::EntryManager::EntryManager(DomainEntryStorage *entry_storage, size_t entry_count) : lock(false) {
         this->entries = reinterpret_cast<Entry *>(entry_storage);
         this->num_entries = entry_count;
         for (size_t i = 0; i < this->num_entries; i++) {

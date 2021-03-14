@@ -16,44 +16,46 @@
 #pragma once
 #include <stratosphere.hpp>
 
+/* TODO: In libstratosphere, eventually? */
+#define AMS_DMNT_I_CHEAT_INTERFACE_INTERFACE_INFO(C, H)                                                                                                                                                        \
+    AMS_SF_METHOD_INFO(C, H, 65000, void,   HasCheatProcess,             (sf::Out<bool> out),                                                                                  (out))                          \
+    AMS_SF_METHOD_INFO(C, H, 65001, void,   GetCheatProcessEvent,        (sf::OutCopyHandle out_event),                                                                        (out_event))                    \
+    AMS_SF_METHOD_INFO(C, H, 65002, Result, GetCheatProcessMetadata,     (sf::Out<dmnt::cheat::CheatProcessMetadata> out_metadata),                                            (out_metadata))                 \
+    AMS_SF_METHOD_INFO(C, H, 65003, Result, ForceOpenCheatProcess,       (),                                                                                                   ())                             \
+    AMS_SF_METHOD_INFO(C, H, 65004, Result, PauseCheatProcess,           (),                                                                                                   ())                             \
+    AMS_SF_METHOD_INFO(C, H, 65005, Result, ResumeCheatProcess,          (),                                                                                                   ())                             \
+    AMS_SF_METHOD_INFO(C, H, 65100, Result, GetCheatProcessMappingCount, (sf::Out<u64> out_count),                                                                             (out_count))                    \
+    AMS_SF_METHOD_INFO(C, H, 65101, Result, GetCheatProcessMappings,     (const sf::OutArray<MemoryInfo> &mappings, sf::Out<u64> out_count, u64 offset),                       (mappings, out_count, offset))  \
+    AMS_SF_METHOD_INFO(C, H, 65102, Result, ReadCheatProcessMemory,      (const sf::OutBuffer &buffer, u64 address, u64 out_size),                                             (buffer, address, out_size))    \
+    AMS_SF_METHOD_INFO(C, H, 65103, Result, WriteCheatProcessMemory,     (const sf::InBuffer &buffer, u64 address, u64 in_size),                                               (buffer, address, in_size))     \
+    AMS_SF_METHOD_INFO(C, H, 65104, Result, QueryCheatProcessMemory,     (sf::Out<MemoryInfo> mapping, u64 address),                                                           (mapping, address))             \
+    AMS_SF_METHOD_INFO(C, H, 65200, Result, GetCheatCount,               (sf::Out<u64> out_count),                                                                             (out_count))                    \
+    AMS_SF_METHOD_INFO(C, H, 65201, Result, GetCheats,                   (const sf::OutArray<dmnt::cheat::CheatEntry> &cheats, sf::Out<u64> out_count, u64 offset),            (cheats, out_count, offset))    \
+    AMS_SF_METHOD_INFO(C, H, 65202, Result, GetCheatById,                (sf::Out<dmnt::cheat::CheatEntry> cheat, u32 cheat_id),                                               (cheat, cheat_id))              \
+    AMS_SF_METHOD_INFO(C, H, 65203, Result, ToggleCheat,                 (u32 cheat_id),                                                                                       (cheat_id))                     \
+    AMS_SF_METHOD_INFO(C, H, 65204, Result, AddCheat,                    (const dmnt::cheat::CheatDefinition &cheat, sf::Out<u32> out_cheat_id, bool enabled),                 (cheat, out_cheat_id, enabled)) \
+    AMS_SF_METHOD_INFO(C, H, 65205, Result, RemoveCheat,                 (u32 cheat_id),                                                                                       (cheat_id))                     \
+    AMS_SF_METHOD_INFO(C, H, 65206, Result, ReadStaticRegister,          (sf::Out<u64> out, u8 which),                                                                         (out, which))                   \
+    AMS_SF_METHOD_INFO(C, H, 65207, Result, WriteStaticRegister,         (u8 which, u64 value),                                                                                (which, value))                 \
+    AMS_SF_METHOD_INFO(C, H, 65208, Result, ResetStaticRegisters,        (),                                                                                                   ())                             \
+    AMS_SF_METHOD_INFO(C, H, 65300, Result, GetFrozenAddressCount,       (sf::Out<u64> out_count),                                                                             (out_count))                    \
+    AMS_SF_METHOD_INFO(C, H, 65301, Result, GetFrozenAddresses,          (const sf::OutArray<dmnt::cheat::FrozenAddressEntry> &addresses, sf::Out<u64> out_count, u64 offset), (addresses, out_count, offset)) \
+    AMS_SF_METHOD_INFO(C, H, 65302, Result, GetFrozenAddress,            (sf::Out<dmnt::cheat::FrozenAddressEntry> entry, u64 address),                                        (entry, address))               \
+    AMS_SF_METHOD_INFO(C, H, 65303, Result, EnableFrozenAddress,         (sf::Out<u64> out_value, u64 address, u64 width),                                                     (out_value, address, width))    \
+    AMS_SF_METHOD_INFO(C, H, 65304, Result, DisableFrozenAddress,        (u64 address),                                                                                        (address))
+
+AMS_SF_DEFINE_INTERFACE(ams::dmnt::cheat::impl, ICheatInterface, AMS_DMNT_I_CHEAT_INTERFACE_INTERFACE_INFO)
+
 namespace ams::dmnt::cheat {
 
-    class CheatService final : public sf::IServiceObject {
-        private:
-            enum class CommandId {
-                /* Meta */
-                HasCheatProcess         = 65000,
-                GetCheatProcessEvent    = 65001,
-                GetCheatProcessMetadata = 65002,
-                ForceOpenCheatProcess   = 65003,
-
-                /* Interact with Memory */
-                GetCheatProcessMappingCount = 65100,
-                GetCheatProcessMappings     = 65101,
-                ReadCheatProcessMemory      = 65102,
-                WriteCheatProcessMemory     = 65103,
-                QueryCheatProcessMemory     = 65104,
-
-                /* Interact with Cheats */
-                GetCheatCount = 65200,
-                GetCheats     = 65201,
-                GetCheatById  = 65202,
-                ToggleCheat   = 65203,
-                AddCheat      = 65204,
-                RemoveCheat   = 65205,
-
-                /* Interact with Frozen Addresses */
-                GetFrozenAddressCount = 65300,
-                GetFrozenAddresses    = 65301,
-                GetFrozenAddress      = 65302,
-                EnableFrozenAddress   = 65303,
-                DisableFrozenAddress  = 65304,
-            };
-        private:
+    class CheatService {
+        public:
             void HasCheatProcess(sf::Out<bool> out);
             void GetCheatProcessEvent(sf::OutCopyHandle out_event);
             Result GetCheatProcessMetadata(sf::Out<CheatProcessMetadata> out_metadata);
             Result ForceOpenCheatProcess();
+            Result PauseCheatProcess();
+            Result ResumeCheatProcess();
 
             Result GetCheatProcessMappingCount(sf::Out<u64> out_count);
             Result GetCheatProcessMappings(const sf::OutArray<MemoryInfo> &mappings, sf::Out<u64> out_count, u64 offset);
@@ -67,39 +69,16 @@ namespace ams::dmnt::cheat {
             Result ToggleCheat(u32 cheat_id);
             Result AddCheat(const CheatDefinition &cheat, sf::Out<u32> out_cheat_id, bool enabled);
             Result RemoveCheat(u32 cheat_id);
+            Result ReadStaticRegister(sf::Out<u64> out, u8 which);
+            Result WriteStaticRegister(u8 which, u64 value);
+            Result ResetStaticRegisters();
 
             Result GetFrozenAddressCount(sf::Out<u64> out_count);
             Result GetFrozenAddresses(const sf::OutArray<FrozenAddressEntry> &addresses, sf::Out<u64> out_count, u64 offset);
             Result GetFrozenAddress(sf::Out<FrozenAddressEntry> entry, u64 address);
             Result EnableFrozenAddress(sf::Out<u64> out_value, u64 address, u64 width);
             Result DisableFrozenAddress(u64 address);
-
-        public:
-            DEFINE_SERVICE_DISPATCH_TABLE {
-                MAKE_SERVICE_COMMAND_META(HasCheatProcess),
-                MAKE_SERVICE_COMMAND_META(GetCheatProcessEvent),
-                MAKE_SERVICE_COMMAND_META(GetCheatProcessMetadata),
-                MAKE_SERVICE_COMMAND_META(ForceOpenCheatProcess),
-
-                MAKE_SERVICE_COMMAND_META(GetCheatProcessMappingCount),
-                MAKE_SERVICE_COMMAND_META(GetCheatProcessMappings),
-                MAKE_SERVICE_COMMAND_META(ReadCheatProcessMemory),
-                MAKE_SERVICE_COMMAND_META(WriteCheatProcessMemory),
-                MAKE_SERVICE_COMMAND_META(QueryCheatProcessMemory),
-
-                MAKE_SERVICE_COMMAND_META(GetCheatCount),
-                MAKE_SERVICE_COMMAND_META(GetCheats),
-                MAKE_SERVICE_COMMAND_META(GetCheatById),
-                MAKE_SERVICE_COMMAND_META(ToggleCheat),
-                MAKE_SERVICE_COMMAND_META(AddCheat),
-                MAKE_SERVICE_COMMAND_META(RemoveCheat),
-
-                MAKE_SERVICE_COMMAND_META(GetFrozenAddressCount),
-                MAKE_SERVICE_COMMAND_META(GetFrozenAddresses),
-                MAKE_SERVICE_COMMAND_META(GetFrozenAddress),
-                MAKE_SERVICE_COMMAND_META(EnableFrozenAddress),
-                MAKE_SERVICE_COMMAND_META(DisableFrozenAddress),
-            };
     };
+    static_assert(impl::IsICheatInterface<CheatService>);
 
 }

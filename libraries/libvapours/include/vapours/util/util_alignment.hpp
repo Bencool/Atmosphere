@@ -17,16 +17,11 @@
 #pragma once
 #include <vapours/common.hpp>
 #include <vapours/assert.hpp>
+#include <vapours/util/util_bitutil.hpp>
 
 namespace ams::util {
 
     /* Utilities for alignment to power of two. */
-    template<typename T>
-    constexpr ALWAYS_INLINE bool IsPowerOfTwo(T value) {
-        using U = typename std::make_unsigned<T>::type;
-        return (static_cast<U>(value) & static_cast<U>(value - 1)) == 0;
-    }
-
     template<typename T>
     constexpr ALWAYS_INLINE T AlignUp(T value, size_t alignment) {
         using U = typename std::make_unsigned<T>::type;
@@ -76,6 +71,11 @@ namespace ams::util {
     template<>
     constexpr ALWAYS_INLINE bool IsAligned<const void *>(const void *value, size_t alignment) {
         return IsAligned(reinterpret_cast<uintptr_t>(value), alignment);
+    }
+
+    template<typename T, typename U> requires std::integral<T> && std::integral<U>
+    constexpr ALWAYS_INLINE T DivideUp(T x, U y) {
+        return (x + (y - 1)) / y;
     }
 
 }

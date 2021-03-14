@@ -68,33 +68,77 @@ namespace ams::sf {
 
         struct OutObjectTag{};
 
+        template<size_t, size_t>
+        class InOutObjectHolder;
+
     }
 
-    template<typename T>
-    class IsOutForceEnabled<std::shared_ptr<T>> : public std::true_type{};
-
-    template<typename ServiceImpl>
-    class Out<std::shared_ptr<ServiceImpl>> : public impl::OutObjectTag {
-        static_assert(std::is_base_of<sf::IServiceObject, ServiceImpl>::value, "Out<std::shared_ptr<ServiceImpl>> requires ServiceObject base.");
-
-        template<typename, typename>
+    template<typename ServiceImpl> requires std::derived_from<ServiceImpl, IServiceObject>
+    class Out<SharedPointer<ServiceImpl>> : public impl::OutObjectTag {
+        template<typename>
         friend class Out;
-
         public:
-            using ServiceImplType = ServiceImpl;
+            using Interface = ServiceImpl;
         private:
-            cmif::ServiceObjectHolder *srv;
-            cmif::DomainObjectId *object_id;
+            impl::SharedPointerBase *m_out;
+            cmif::DomainObjectId *m_object_id;
+        private:
+            Out(impl::SharedPointerBase *p, cmif::DomainObjectId *o = nullptr) : m_out(p), m_object_id(o) { /* ... */ }
         public:
-            Out(cmif::ServiceObjectHolder *s) : srv(s), object_id(nullptr) { /* ... */ }
-            Out(cmif::ServiceObjectHolder *s, cmif::DomainObjectId *o) : srv(s), object_id(o) { /* ... */ }
+            Out(const Out &rhs) : m_out(rhs.m_out), m_object_id(rhs.m_object_id) { /* ... */ }
 
-            void SetValue(std::shared_ptr<ServiceImpl> &&s, cmif::DomainObjectId new_object_id = cmif::InvalidDomainObjectId) {
-                *this->srv = cmif::ServiceObjectHolder(std::move(s));
+            Out(SharedPointer<ServiceImpl> *out, cmif::DomainObjectId *o = nullptr) : m_out(std::addressof(out->m_base)), m_object_id(o) { /* .... */ }
+
+            template<typename U> requires std::derived_from<U, ServiceImpl>
+            Out(Out<SharedPointer<U>> out) : m_out(out.m_out), m_object_id(out.m_object_id) { /* ... */ }
+
+            template<typename U> requires std::derived_from<U, ServiceImpl>
+            Out(SharedPointer<U> *out, cmif::DomainObjectId *o = nullptr) : m_out(std::addressof(out->m_base)), m_object_id(o)  { /* .... */ }
+
+            void SetValue(SharedPointer<ServiceImpl> s, cmif::DomainObjectId new_object_id = cmif::InvalidDomainObjectId) {
+                *m_out = std::move(s.m_base);
                 if (new_object_id != cmif::InvalidDomainObjectId) {
-                    AMS_ABORT_UNLESS(object_id != nullptr);
-                    *this->object_id = new_object_id;
+                    AMS_ABORT_UNLESS(m_object_id != nullptr);
+                    *m_object_id = new_object_id;
                 }
+            }
+
+            template<typename U> requires std::derived_from<U, ServiceImpl>
+            void SetValue(SharedPointer<U> s, cmif::DomainObjectId new_object_id = cmif::InvalidDomainObjectId) {
+                *m_out = std::move(s.m_base);
+                if (new_object_id != cmif::InvalidDomainObjectId) {
+                    AMS_ABORT_UNLESS(m_object_id != nullptr);
+                    *m_object_id = new_object_id;
+                }
+            }
+
+            class DerefProxy {
+                template<typename>
+                friend class Out;
+                private:
+                    Out &m_target;
+                private:
+                    explicit DerefProxy(Out &t) : m_target(t) { /* ... */ }
+                public:
+                    DerefProxy &operator=(SharedPointer<ServiceImpl> p) {
+                        m_target.SetValue(std::move(p));
+                        return *this;
+                    }
+
+                    template<typename U> requires std::derived_from<U, ServiceImpl>
+                    DerefProxy &operator=(SharedPointer<U> p) {
+                        m_target.SetValue(std::move(p));
+                        return *this;
+                    }
+            };
+
+            DerefProxy operator *() {
+                return DerefProxy(*this);
+            }
+
+            template<typename U>
+            Out<SharedPointer<U>> DownCast() {
+                return Out<SharedPointer<U>>(m_out, m_object_id);
             }
     };
 
@@ -149,8 +193,8 @@ namespace ams::sf::impl {
     struct IsInObject : public std::false_type{};
 
     template<typename T>
-    struct IsInObject<std::shared_ptr<T>> : public std::true_type {
-        static_assert(std::is_base_of<sf::IServiceObject, T>::value, "Invalid IsInObject<std::shared_ptr<T>>");
+    struct IsInObject<sf::SharedPointer<T>> : public std::true_type {
+        static_assert(std::is_base_of<sf::IServiceObject, T>::value, "Invalid IsInObject<sf::SharedPointer<T>>");
     };
 
     template<typename T>
@@ -308,11 +352,7 @@ namespace ams::sf::impl {
                 /* Use insertion sort, which is stable and optimal for small numbers of parameters. */
                 for (size_t i = 1; i < sizeof...(Ts); i++) {
                     for (size_t j = i; j > 0 && values[map[j-1]] > values[map[j]]; j--) {
-                        /* std::swap is not constexpr until c++20 :( */
-                        /* TODO: std::swap(map[j], map[j-1]); */
-                        const size_t tmp = map[j];
-                        map[j] = map[j-1];
-                        map[j-1] = tmp;
+                        std::swap(map[j], map[j-1]);
                     }
                 }
             }
@@ -372,26 +412,14 @@ namespace ams::sf::impl {
         size_t out_object_index;
     };
 
-    template<auto MemberFunction>
+    template<typename T>
+    using DecayForCommandMetaArguments = typename std::conditional<sf::IsLargeData<typename std::decay<T>::type> && !std::is_base_of<impl::OutBaseTag, typename std::decay<T>::type>::value, T, typename std::decay<T>::type>::type;
+
+    template<typename... Arguments>
     struct CommandMetaInfo {
-        private:
-            template<typename R, typename C, typename... A>
-            static R GetReturnTypeImpl(R(C::*)(A...));
-
-            template<typename R, typename C, typename... A>
-            static C *GetClassTypePointerImpl(R(C::*)(A...));
-
-            template<typename R, typename C, typename... A>
-            static std::tuple<typename std::decay<A>::type...> GetArgsImpl(R(C::*)(A...));
         public:
-            using ReturnType        = decltype(GetReturnTypeImpl(MemberFunction));
-            using ClassTypePointer  = decltype(GetClassTypePointerImpl(MemberFunction));
-            using ArgsType          = decltype(GetArgsImpl(MemberFunction));
-            using ClassType         = typename std::remove_pointer<ClassTypePointer>::type;
-
-            static constexpr bool ReturnsResult = std::is_same<ReturnType, Result>::value;
-            static constexpr bool ReturnsVoid   = std::is_same<ReturnType, void>::value;
-            static_assert(ReturnsResult || ReturnsVoid, "Service Commands must return Result or void.");
+            using ArgsTypeForInvoke = std::tuple<DecayForCommandMetaArguments<Arguments>...>;
+            using ArgsType          = std::tuple<typename std::decay<Arguments>::type...>;
 
             using InDatas    = TupleFilter<InDataFilter>::FilteredType<ArgsType>;
             using OutDatas   = TupleFilter<OutDataFilter>::FilteredType<ArgsType>;
@@ -604,8 +632,9 @@ namespace ams::sf::impl {
         private:
             MoveHandle move_handles[NumMove];
             CopyHandle copy_handles[NumCopy];
+            bool copy_managed[NumCopy];
         public:
-            constexpr OutHandleHolder() : move_handles(), copy_handles() { /* ... */ }
+            constexpr OutHandleHolder() : move_handles(), copy_handles(), copy_managed() { /* ... */ }
 
             template<size_t Index>
             constexpr inline MoveHandle *GetMoveHandlePointer() {
@@ -619,8 +648,15 @@ namespace ams::sf::impl {
                 return &copy_handles[Index];
             }
 
-            constexpr inline void CopyTo(const HipcRequest &response, const size_t num_out_object_handles) {
-                #define _SF_OUT_HANDLE_HOLDER_WRITE_COPY_HANDLE(n) do { if constexpr (NumCopy > n) { response.copy_handles[n] = copy_handles[n].GetValue(); } } while (0)
+            template<size_t Index>
+            constexpr inline bool *GetCopyHandleManagedPointer() {
+                static_assert(Index < NumCopy, "Index < NumCopy");
+                return &copy_managed[Index];
+            }
+
+            constexpr inline void CopyTo(const cmif::ServiceDispatchContext &ctx, const HipcRequest &response, const size_t num_out_object_handles) {
+                ctx.handles_to_close->num_handles = 0;
+                #define _SF_OUT_HANDLE_HOLDER_WRITE_COPY_HANDLE(n) do { if constexpr (NumCopy > n) { const auto handle = copy_handles[n].GetValue(); response.copy_handles[n] = handle; if (copy_managed[n]) { ctx.handles_to_close->handles[ctx.handles_to_close->num_handles++] = handle; } } } while (0)
                 _SF_OUT_HANDLE_HOLDER_WRITE_COPY_HANDLE(0);
                 _SF_OUT_HANDLE_HOLDER_WRITE_COPY_HANDLE(1);
                 _SF_OUT_HANDLE_HOLDER_WRITE_COPY_HANDLE(2);
@@ -648,6 +684,7 @@ namespace ams::sf::impl {
         private:
             std::array<cmif::ServiceObjectHolder, NumInObjects> in_object_holders;
             std::array<cmif::ServiceObjectHolder, NumOutObjects> out_object_holders;
+            std::array<TYPED_STORAGE(SharedPointer<sf::IServiceObject>), NumOutObjects> out_shared_pointers;
             std::array<cmif::DomainObjectId, NumOutObjects> out_object_ids;
         public:
             constexpr InOutObjectHolder() : in_object_holders(), out_object_holders() {
@@ -675,8 +712,8 @@ namespace ams::sf::impl {
                 static_assert(std::tuple_size<ServiceImplTuple>::value == NumInObjects);
                 #define _SF_IN_OUT_HOLDER_VALIDATE_IN_OBJECT(n) do { \
                     if constexpr (NumInObjects > n) { \
-                        using SharedPtrToServiceImplType = typename std::tuple_element<n, ServiceImplTuple>::type; \
-                        using ServiceImplType = typename SharedPtrToServiceImplType::element_type; \
+                        using SharedPointerType = typename std::tuple_element<n, ServiceImplTuple>::type; \
+                        using ServiceImplType   = typename SharedPointerType::Interface; \
                         R_UNLESS((this->in_object_holders[n].template IsServiceObjectValid<ServiceImplType>()), sf::cmif::ResultInvalidInObject()); \
                     } \
                 } while (0)
@@ -692,15 +729,21 @@ namespace ams::sf::impl {
                 return ResultSuccess();
             }
 
-            template<size_t Index, typename ServiceImpl>
-            std::shared_ptr<ServiceImpl> GetInObject() const {
-                /* We know from ValidateInObjects() that this will succeed always. */
-                return this->in_object_holders[Index].template GetServiceObject<ServiceImpl>();
+            template<size_t Index, typename Interface>
+            SharedPointer<Interface> *GetOutObjectSharedPointer() {
+                static_assert(sizeof(SharedPointer<Interface>) == sizeof(SharedPointer<sf::IServiceObject>));
+                return static_cast<SharedPointer<Interface> *>(static_cast<void *>(&out_shared_pointers[Index]));
             }
 
-            template<size_t Index, typename ServiceImpl>
-            Out<std::shared_ptr<ServiceImpl>> GetOutObject() {
-                return Out<std::shared_ptr<ServiceImpl>>(&this->out_object_holders[Index], &this->out_object_ids[Index]);
+            template<size_t Index, typename Interface>
+            Out<SharedPointer<Interface>> GetOutObject() {
+                auto sp = new (GetOutObjectSharedPointer<Index, Interface>()) SharedPointer<Interface>;
+                return Out<SharedPointer<Interface>>(sp, &this->out_object_ids[Index]);
+            }
+
+            template<size_t Index, typename Interface>
+            void SetOutObject() {
+                this->out_object_holders[Index] = cmif::ServiceObjectHolder(std::move(*GetOutObjectSharedPointer<Index, Interface>()));
             }
 
             constexpr void SetOutObjects(const cmif::ServiceDispatchContext &ctx, const HipcRequest &response) {
@@ -783,7 +826,8 @@ namespace ams::sf::impl {
             }
 
         /* Useful defines. */
-        using ArgsType = typename CommandMeta::ArgsType;
+        using ArgsTypeForInvoke = typename CommandMeta::ArgsTypeForInvoke;
+        using ArgsType          = typename CommandMeta::ArgsType;
         using BufferArrayType = std::array<cmif::PointerAndSize, CommandMeta::NumBuffers>;
         using OutRawHolderType = OutRawHolder<CommandMeta::OutDataSize, CommandMeta::OutDataAlign>;
         using OutHandleHolderType = OutHandleHolder<CommandMeta::NumOutMoveHandles, CommandMeta::NumOutCopyHandles>;
@@ -970,7 +1014,7 @@ namespace ams::sf::impl {
         /* Argument deserialization. */
         private:
             template<size_t Index, typename T = typename std::tuple_element<Index, ArgsType>::type>
-            NX_CONSTEXPR T DeserializeArgumentImpl(const cmif::ServiceDispatchContext &ctx, const cmif::PointerAndSize &in_raw_data, const OutRawHolderType &out_raw_holder, const BufferArrayType &buffers, OutHandleHolderType &out_handles_holder, InOutObjectHolderType &in_out_objects_holder) {
+            NX_CONSTEXPR typename std::tuple_element<Index, ArgsTypeForInvoke>::type DeserializeArgumentImpl(const cmif::ServiceDispatchContext &ctx, const cmif::PointerAndSize &in_raw_data, const OutRawHolderType &out_raw_holder, const BufferArrayType &buffers, OutHandleHolderType &out_handles_holder, InOutObjectHolderType &in_out_objects_holder) {
                 constexpr auto Info = CommandMeta::ArgumentSerializationInfos[Index];
                 if constexpr (Info.arg_type == ArgumentType::InData) {
                     /* New in rawdata. */
@@ -999,16 +1043,16 @@ namespace ams::sf::impl {
                     if constexpr (std::is_same<T, sf::Out<sf::MoveHandle>>::value) {
                         return T(out_handles_holder.template GetMoveHandlePointer<Info.out_move_handle_index>());
                     } else if constexpr (std::is_same<T, sf::Out<sf::CopyHandle>>::value) {
-                        return T(out_handles_holder.template GetCopyHandlePointer<Info.out_copy_handle_index>());
+                        return T(out_handles_holder.template GetCopyHandlePointer<Info.out_copy_handle_index>(), out_handles_holder.template GetCopyHandleManagedPointer<Info.out_copy_handle_index>());
                     } else {
                         static_assert(!std::is_same<T, T>::value, "Invalid OutHandle kind");
                     }
                 } else if constexpr (Info.arg_type == ArgumentType::InObject) {
                     /* New InObject. */
-                    return in_out_objects_holder.template GetInObject<Info.in_object_index, typename T::element_type>();
+                    return in_out_objects_holder.template GetInObject<Info.in_object_index, typename T::Interface>();
                 } else if constexpr (Info.arg_type == ArgumentType::OutObject) {
                     /* New OutObject. */
-                    return in_out_objects_holder.template GetOutObject<Info.out_object_index, typename T::ServiceImplType>();
+                    return in_out_objects_holder.template GetOutObject<Info.out_object_index, typename T::Interface>();
                 } else if constexpr (Info.arg_type == ArgumentType::Buffer) {
                     /* Buffers were already processed earlier. */
                     if constexpr (sf::IsLargeData<T>) {
@@ -1016,6 +1060,8 @@ namespace ams::sf::impl {
                         constexpr auto Attributes = CommandMeta::BufferAttributes[Info.buffer_index];
                         if constexpr (Attributes & SfBufferAttr_In) {
                             /* TODO: AMS_ABORT_UNLESS()? N does not bother. */
+                            using InvokeType = typename std::tuple_element<Index, ArgsTypeForInvoke>::type;
+                            static_assert(std::same_as<InvokeType, const T &>);
                             return *reinterpret_cast<const T *>(buffers[Info.buffer_index].GetAddress());
                         } else if constexpr (Attributes & SfBufferAttr_Out) {
                             return T(buffers[Info.buffer_index]);
@@ -1032,32 +1078,30 @@ namespace ams::sf::impl {
             }
 
             template<size_t... Is>
-            NX_CONSTEXPR ArgsType DeserializeArgumentsImpl(const cmif::ServiceDispatchContext &ctx, const cmif::PointerAndSize &in_raw_data, const OutRawHolderType &out_raw_holder, const BufferArrayType &buffers, OutHandleHolderType &out_handles_holder, InOutObjectHolderType &in_out_objects_holder, std::index_sequence<Is...>) {
-                return ArgsType { DeserializeArgumentImpl<Is>(ctx, in_raw_data, out_raw_holder, buffers, out_handles_holder, in_out_objects_holder)..., };
+            NX_CONSTEXPR ArgsTypeForInvoke DeserializeArgumentsImpl(const cmif::ServiceDispatchContext &ctx, const cmif::PointerAndSize &in_raw_data, const OutRawHolderType &out_raw_holder, const BufferArrayType &buffers, OutHandleHolderType &out_handles_holder, InOutObjectHolderType &in_out_objects_holder, std::index_sequence<Is...>) {
+                return ArgsTypeForInvoke { DeserializeArgumentImpl<Is>(ctx, in_raw_data, out_raw_holder, buffers, out_handles_holder, in_out_objects_holder)..., };
             }
         public:
-            NX_CONSTEXPR ArgsType DeserializeArguments(const cmif::ServiceDispatchContext &ctx, const cmif::PointerAndSize &in_raw_data, const OutRawHolderType &out_raw_holder, const BufferArrayType &buffers, OutHandleHolderType &out_handles_holder, InOutObjectHolderType &in_out_objects_holder) {
-                return DeserializeArgumentsImpl(ctx, in_raw_data, out_raw_holder, buffers, out_handles_holder, in_out_objects_holder, std::make_index_sequence<std::tuple_size<ArgsType>::value>{});
+            NX_CONSTEXPR ArgsTypeForInvoke DeserializeArguments(const cmif::ServiceDispatchContext &ctx, const cmif::PointerAndSize &in_raw_data, const OutRawHolderType &out_raw_holder, const BufferArrayType &buffers, OutHandleHolderType &out_handles_holder, InOutObjectHolderType &in_out_objects_holder) {
+                return DeserializeArgumentsImpl(ctx, in_raw_data, out_raw_holder, buffers, out_handles_holder, in_out_objects_holder, std::make_index_sequence<std::tuple_size<ArgsTypeForInvoke>::value>{});
             }
     };
 
     constexpr Result GetCmifOutHeaderPointer(CmifOutHeader **out_header_ptr, cmif::PointerAndSize &out_raw_data) {
-        CmifOutHeader *header = reinterpret_cast<CmifOutHeader *>(out_raw_data.GetPointer());
+        CmifOutHeader *header = static_cast<CmifOutHeader *>(out_raw_data.GetPointer());
         R_UNLESS(out_raw_data.GetSize() >= sizeof(*header), sf::cmif::ResultInvalidHeaderSize());
         out_raw_data = cmif::PointerAndSize(out_raw_data.GetAddress() + sizeof(*header), out_raw_data.GetSize() - sizeof(*header));
         *out_header_ptr = header;
         return ResultSuccess();
     }
 
-    template<auto ServiceCommandImpl>
-    constexpr Result InvokeServiceCommandImpl(CmifOutHeader **out_header_ptr, cmif::ServiceDispatchContext &ctx, const cmif::PointerAndSize &in_raw_data) {
-        using CommandMeta = CommandMetaInfo<ServiceCommandImpl>;
+    template<typename CommandMeta, typename... Arguments>
+    constexpr Result InvokeServiceCommandImplCommon(CmifOutHeader **out_header_ptr, cmif::ServiceDispatchContext &ctx, const cmif::PointerAndSize &in_raw_data, Result (*invoke_impl)(sf::IServiceObject *, Arguments &&...)) {
         using ImplProcessorType = HipcCommandProcessor<CommandMeta>;
         using BufferArrayType = std::array<cmif::PointerAndSize, CommandMeta::NumBuffers>;
         using OutHandleHolderType = OutHandleHolder<CommandMeta::NumOutMoveHandles, CommandMeta::NumOutCopyHandles>;
         using OutRawHolderType = OutRawHolder<CommandMeta::OutDataSize, CommandMeta::OutDataAlign>;
         using InOutObjectHolderType = InOutObjectHolder<CommandMeta::NumInObjects, CommandMeta::NumOutObjects>;
-        static_assert(std::is_base_of<sf::IServiceObject, typename CommandMeta::ClassType>::value, "InvokeServiceCommandImpl: Service Commands must be ServiceObject member functions");
 
         /* Create a processor for us to work with. */
         ImplProcessorType impl_processor;
@@ -1089,17 +1133,16 @@ namespace ams::sf::impl {
 
         /* Decoding/Invocation. */
         {
-            typename CommandMeta::ClassTypePointer this_ptr = static_cast<typename CommandMeta::ClassTypePointer>(ctx.srv_obj);
-            typename CommandMeta::ArgsType args_tuple = ImplProcessorType::DeserializeArguments(ctx, in_raw_data, out_raw_holder, buffers, out_handles_holder, in_out_objects_holder);
+            typename CommandMeta::ArgsTypeForInvoke args_tuple = ImplProcessorType::DeserializeArguments(ctx, in_raw_data, out_raw_holder, buffers, out_handles_holder, in_out_objects_holder);
 
             /* Handle in process ID holder if relevant. */
             if constexpr (CommandMeta::HasInProcessIdHolder) {
                 /* TODO: More precise value than 32? */
-                static_assert(std::tuple_size<typename CommandMeta::ArgsType>::value <= 32, "Commands must have <= 32 arguments");
+                static_assert(std::tuple_size<typename CommandMeta::ArgsTypeForInvoke>::value <= 32, "Commands must have <= 32 arguments");
                 os::ProcessId process_id{ctx.request.pid};
                 #define _SF_IMPL_PROCESSOR_MARSHAL_PROCESS_ID(n) do {                                         \
-                    using ArgsType = typename CommandMeta::ArgsType;                                          \
-                    if constexpr (n < std::tuple_size<ArgsType>::value) {                                     \
+                    using ArgsTypeForInvoke = typename CommandMeta::ArgsTypeForInvoke;                        \
+                    if constexpr (n < std::tuple_size<ArgsTypeForInvoke>::value) {                            \
                         if constexpr (CommandMeta::template IsInProcessIdHolderIndex<n>) {                    \
                             R_TRY(MarshalProcessId(std::get<n>(args_tuple), process_id));                     \
                         }                                                                                     \
@@ -1116,16 +1159,18 @@ namespace ams::sf::impl {
                 #undef _SF_IMPL_PROCESSOR_MARSHAL_PROCESS_ID
             }
 
-            if constexpr (CommandMeta::ReturnsResult) {
-                const auto command_result = std::apply([=](auto&&... args) { return (this_ptr->*ServiceCommandImpl)(args...); }, args_tuple);
-                if (R_FAILED(command_result)) {
-                    cmif::PointerAndSize out_raw_data;
-                    ctx.processor->PrepareForErrorReply(ctx, out_raw_data, runtime_metadata);
-                    R_TRY(GetCmifOutHeaderPointer(out_header_ptr, out_raw_data));
-                    return command_result;
-                }
-            } else {
-                std::apply([=](auto&&... args) { (this_ptr->*ServiceCommandImpl)(args...); }, args_tuple);
+            using TrueArgumentsTuple = std::tuple<Arguments...>;
+
+            sf::IServiceObject * const this_ptr = ctx.srv_obj;
+            const auto command_result = [this_ptr, invoke_impl, &args_tuple]<size_t ...Ix>(std::index_sequence<Ix...>) ALWAYS_INLINE_LAMBDA {
+                return invoke_impl(this_ptr, std::forward<typename std::tuple_element<Ix, TrueArgumentsTuple>::type>(std::get<Ix>(args_tuple))...);
+            }(std::make_index_sequence<std::tuple_size<typename CommandMeta::ArgsTypeForInvoke>::value>());
+
+            if (R_FAILED(command_result)) {
+                cmif::PointerAndSize out_raw_data;
+                ctx.processor->PrepareForErrorReply(ctx, out_raw_data, runtime_metadata);
+                R_TRY(GetCmifOutHeaderPointer(out_header_ptr, out_raw_data));
+                return command_result;
             }
         }
 
@@ -1142,28 +1187,61 @@ namespace ams::sf::impl {
         ImplProcessorType::SetOutBuffers(response, buffers, is_buffer_map_alias);
 
         /* Set out handles. */
-        out_handles_holder.CopyTo(response, runtime_metadata.GetOutObjectCount());
+        out_handles_holder.CopyTo(ctx, response, runtime_metadata.GetOutObjectCount());
 
         /* Set output objects. */
+        #define _SF_IMPL_PROCESSOR_MARSHAL_OUT_OBJECT(n) do {                                                                                    \
+            if constexpr (n < CommandMeta::NumOutObjects) {                                                                                      \
+                in_out_objects_holder.template SetOutObject<n, typename std::tuple_element_t<n, typename CommandMeta::OutObjects>::Interface>(); \
+            }                                                                                                                                    \
+        } while (0)
+        _SF_IMPL_PROCESSOR_MARSHAL_OUT_OBJECT(0);
+        _SF_IMPL_PROCESSOR_MARSHAL_OUT_OBJECT(1);
+        _SF_IMPL_PROCESSOR_MARSHAL_OUT_OBJECT(2);
+        _SF_IMPL_PROCESSOR_MARSHAL_OUT_OBJECT(3);
+        _SF_IMPL_PROCESSOR_MARSHAL_OUT_OBJECT(4);
+        _SF_IMPL_PROCESSOR_MARSHAL_OUT_OBJECT(5);
+        _SF_IMPL_PROCESSOR_MARSHAL_OUT_OBJECT(6);
+        _SF_IMPL_PROCESSOR_MARSHAL_OUT_OBJECT(7);
+        _SF_IMPL_PROCESSOR_MARSHAL_OUT_OBJECT(8);
+        #undef _SF_IMPL_PROCESSOR_MARSHAL_OUT_OBJECT
         in_out_objects_holder.SetOutObjects(ctx, response);
 
         return ResultSuccess();
     }
 
-}
+    template<auto ServiceCommandImpl, typename Return, typename ClassType, typename... Arguments>
+    constexpr Result InvokeServiceCommandImpl(CmifOutHeader **out_header_ptr, cmif::ServiceDispatchContext &ctx, const cmif::PointerAndSize &in_raw_data) {
+        using CommandMeta = CommandMetaInfo<Arguments...>;
+        static_assert(std::is_base_of<sf::IServiceObject, ClassType>::value, "InvokeServiceCommandImpl: Service Commands must be ServiceObject member functions");
 
-namespace ams::sf {
+        constexpr bool ReturnsResult = std::is_same<Return, Result>::value;
+        constexpr bool ReturnsVoid   = std::is_same<Return, void>::value;
+        static_assert(ReturnsResult || ReturnsVoid, "Service Commands must return Result or void.");
 
-    template <auto CommandId, auto CommandImpl, hos::Version Low = hos::Version_Min, hos::Version High = hos::Version_Max>
-    inline static constexpr cmif::ServiceCommandMeta MakeServiceCommandMeta() {
-        return {
-            .hosver_low = Low,
-            .hosver_high = High,
-            .cmd_id = static_cast<u32>(CommandId),
-            .handler = ::ams::sf::impl::InvokeServiceCommandImpl<CommandImpl>,
-        };
+
+        return InvokeServiceCommandImplCommon<CommandMeta, Arguments...>(out_header_ptr, ctx, in_raw_data, +[](sf::IServiceObject *srv_obj, Arguments &&... args) -> Result {
+            if constexpr (ReturnsResult) {
+                return (static_cast<ClassType *>(srv_obj)->*ServiceCommandImpl)(std::forward<Arguments>(args)...);
+            } else {
+                (static_cast<ClassType *>(srv_obj)->*ServiceCommandImpl)(std::forward<Arguments>(args)...);
+                return ResultSuccess();
+            }
+        });
     }
 
 }
 
-#define MAKE_SERVICE_COMMAND_META(Name, ...) ::ams::sf::MakeServiceCommandMeta<ServiceImpl::CommandId::Name, &ServiceImpl::Name, ##__VA_ARGS__>()
+namespace ams::sf::impl {
+
+    template<hos::Version Low, hos::Version High, u32 CommandId, auto CommandImpl, typename Return, typename ClassType, typename... Arguments>
+    consteval inline cmif::ServiceCommandMeta MakeServiceCommandMeta() {
+        return {
+            .hosver_low  = Low,
+            .hosver_high = High,
+            .cmd_id      = static_cast<u32>(CommandId),
+            .handler     = ::ams::sf::impl::InvokeServiceCommandImpl<CommandImpl, Return, ClassType, Arguments...>,
+        };
+    }
+
+}

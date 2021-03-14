@@ -13,6 +13,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+#include <stratosphere.hpp>
 #include "fatal_repair.hpp"
 #include "fatal_service_for_self.hpp"
 
@@ -22,7 +23,7 @@ namespace ams::fatal::srv {
 
         bool IsInRepair() {
             /* Before firmware 3.0.0, this wasn't implemented. */
-            if (hos::GetVersion() < hos::Version_300) {
+            if (hos::GetVersion() < hos::Version_3_0_0) {
                 return false;
             }
 
@@ -32,28 +33,27 @@ namespace ams::fatal::srv {
 
         bool IsInRepairWithoutVolHeld() {
             if (IsInRepair()) {
-                GpioPadSession vol_btn;
-                if (R_FAILED(gpioOpenSession(&vol_btn, GpioPadName_ButtonVolUp))) {
+                gpio::GpioPadSession vol_btn;
+                if (R_FAILED(gpio::OpenSession(std::addressof(vol_btn), gpio::DeviceCode_ButtonVolUp))) {
                     return true;
                 }
 
                 /* Ensure we close even on early return. */
-                ON_SCOPE_EXIT { gpioPadClose(&vol_btn); };
+                ON_SCOPE_EXIT { gpio::CloseSession(std::addressof(vol_btn)); };
 
                 /* Set direction input. */
-                gpioPadSetDirection(&vol_btn, GpioDirection_Input);
+                gpio::SetDirection(std::addressof(vol_btn), gpio::Direction_Input);
 
                 /* Ensure that we're holding the volume button for a full second. */
-                os::TimeoutHelper timeout_helper(1'000'000'000ul);
-                while (!timeout_helper.TimedOut()) {
-                    GpioValue val;
-                    if (R_FAILED(gpioPadGetValue(&vol_btn, &val)) || val != GpioValue_Low) {
+                auto start = os::GetSystemTick();
+                do {
+                    if (gpio::GetValue(std::addressof(vol_btn)) != gpio::GpioValue_Low) {
                         return true;
                     }
 
                     /* Sleep for 100 ms. */
-                    svcSleepThread(100'000'000ul);
-                }
+                    os::SleepThread(TimeSpan::FromMilliSeconds(100));
+                } while (os::ConvertToTimeSpan(os::GetSystemTick() - start) < TimeSpan::FromSeconds(1));
             }
 
             return false;
@@ -61,7 +61,7 @@ namespace ams::fatal::srv {
 
         bool NeedsRunTimeReviser() {
             /* Before firmware 5.0.0, this wasn't implemented. */
-            if (hos::GetVersion() < hos::Version_500) {
+            if (hos::GetVersion() < hos::Version_5_0_0) {
                 return false;
             }
 

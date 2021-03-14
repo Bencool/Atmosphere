@@ -19,6 +19,8 @@ namespace ams::kern {
 
     namespace {
 
+        KDynamicPageManager g_resource_manager_page_manager;
+
         template<typename T>
         ALWAYS_INLINE void PrintMemoryRegion(const char *prefix, const T &extents) {
             static_assert(std::is_same<decltype(extents.GetAddress()),     uintptr_t>::value);
@@ -37,32 +39,9 @@ namespace ams::kern {
     }
 
     void Kernel::InitializeCoreLocalRegion(s32 core_id) {
-        /* Construct the core local region object in place. */
-        KCoreLocalContext *clc = GetPointer<KCoreLocalContext>(KMemoryLayout::GetCoreLocalRegionAddress());
-        new (clc) KCoreLocalContext;
-
-        /* Set the core local region address into the global register. */
-        cpu::SetCoreLocalRegionAddress(reinterpret_cast<uintptr_t>(clc));
-
-        /* Initialize current context. */
-        clc->current.current_thread = nullptr;
-        clc->current.current_process = nullptr;
-        clc->current.scheduler = std::addressof(clc->scheduler);
-        clc->current.interrupt_task_manager = std::addressof(clc->interrupt_task_manager);
-        clc->current.core_id = core_id;
-        clc->current.exception_stack_top = GetVoidPointer(KMemoryLayout::GetExceptionStackTopAddress(core_id) - sizeof(KThread::StackParameters));
-
-        /* Clear debugging counters. */
-        clc->num_sw_interrupts = 0;
-        clc->num_hw_interrupts = 0;
-        clc->num_svc = 0;
-        clc->num_process_switches = 0;
-        clc->num_thread_switches = 0;
-        clc->num_fpu_switches = 0;
-
-        for (size_t i = 0; i < util::size(clc->perf_counters); i++) {
-            clc->perf_counters[i] = 0;
-        }
+        /* The core local region no longer exists, so just clear the current thread. */
+        AMS_UNUSED(core_id);
+        SetCurrentThread(nullptr);
     }
 
     void Kernel::InitializeMainAndIdleThreads(s32 core_id) {
@@ -78,42 +57,48 @@ namespace ams::kern {
 
         /* Set the current thread to be the main thread, and we have no processes running yet. */
         SetCurrentThread(main_thread);
-        SetCurrentProcess(nullptr);
 
         /* Initialize the interrupt manager, hardware timer, and scheduler */
         GetInterruptManager().Initialize(core_id);
-        GetHardwareTimer().Initialize(core_id);
+        GetHardwareTimer().Initialize();
         GetScheduler().Initialize(idle_thread);
     }
 
     void Kernel::InitializeResourceManagers(KVirtualAddress address, size_t size) {
         /* Ensure that the buffer is suitable for our use. */
-        const size_t app_size   = ApplicationMemoryBlockSlabHeapSize * sizeof(KMemoryBlock);
-        const size_t sys_size   = SystemMemoryBlockSlabHeapSize      * sizeof(KMemoryBlock);
-        const size_t info_size  = BlockInfoSlabHeapSize              * sizeof(KBlockInfo);
-        const size_t fixed_size = util::AlignUp(app_size + sys_size + info_size, PageSize);
+        //const size_t app_size   = ApplicationMemoryBlockSlabHeapSize * sizeof(KMemoryBlock);
+        //const size_t sys_size   = SystemMemoryBlockSlabHeapSize      * sizeof(KMemoryBlock);
+        //const size_t info_size  = BlockInfoSlabHeapSize              * sizeof(KBlockInfo);
+        //const size_t fixed_size = util::AlignUp(app_size + sys_size + info_size, PageSize);
         MESOSPHERE_ABORT_UNLESS(util::IsAligned(GetInteger(address), PageSize));
         MESOSPHERE_ABORT_UNLESS(util::IsAligned(size, PageSize));
-        MESOSPHERE_ABORT_UNLESS(fixed_size < size);
 
-        size_t pt_size = size - fixed_size;
-        const size_t rc_size = util::AlignUp(KPageTableManager::CalculateReferenceCountSize(pt_size), PageSize);
-        MESOSPHERE_ABORT_UNLESS(rc_size < pt_size);
-        pt_size -= rc_size;
+        /* Ensure that we have space for our reference counts. */
+        const size_t rc_size = util::AlignUp(KPageTableManager::CalculateReferenceCountSize(size), PageSize);
+        MESOSPHERE_ABORT_UNLESS(rc_size < size);
+        size -= rc_size;
 
-        /* Initialize the slabheaps. */
-        s_app_memory_block_manager.Initialize(address + pt_size, app_size);
-        s_sys_memory_block_manager.Initialize(address + pt_size + app_size, sys_size);
-        s_block_info_manager.Initialize(address + pt_size + app_size + sys_size, info_size);
-        s_page_table_manager.Initialize(address, pt_size, GetPointer<KPageTableManager::RefCount>(address + pt_size + fixed_size));
+        /* Initialize the resource managers' shared page manager. */
+        g_resource_manager_page_manager.Initialize(address, size);
+
+        /* Initialize the fixed-size slabheaps. */
+        s_app_memory_block_manager.Initialize(std::addressof(g_resource_manager_page_manager), ApplicationMemoryBlockSlabHeapSize);
+        s_sys_memory_block_manager.Initialize(std::addressof(g_resource_manager_page_manager), SystemMemoryBlockSlabHeapSize);
+        s_block_info_manager.Initialize(std::addressof(g_resource_manager_page_manager), BlockInfoSlabHeapSize);
+
+        /* Reserve all remaining pages for the page table manager. */
+        const size_t num_pt_pages = g_resource_manager_page_manager.GetCount() - g_resource_manager_page_manager.GetUsed();
+        s_page_table_manager.Initialize(std::addressof(g_resource_manager_page_manager), num_pt_pages, GetPointer<KPageTableManager::RefCount>(address + size));
     }
 
     void Kernel::PrintLayout() {
+        const auto target_fw = kern::GetTargetFirmware();
+
         /* Print out the kernel version. */
-        /* TODO: target firmware, if we support that? */
         MESOSPHERE_LOG("Horizon Kernel (Mesosphere)\n");
         MESOSPHERE_LOG("Built:                  %s %s\n", __DATE__, __TIME__);
         MESOSPHERE_LOG("Atmosphere version:     %d.%d.%d-%s\n", ATMOSPHERE_RELEASE_VERSION, ATMOSPHERE_GIT_REVISION);
+        MESOSPHERE_LOG("Target Firmware:        %d.%d.%d\n", (target_fw >> 24) & 0xFF, (target_fw >> 16) & 0xFF, (target_fw >> 8) & 0xFF);
         MESOSPHERE_LOG("Supported OS version:   %d.%d.%d\n", ATMOSPHERE_SUPPORTED_HOS_VERSION_MAJOR, ATMOSPHERE_SUPPORTED_HOS_VERSION_MINOR, ATMOSPHERE_SUPPORTED_HOS_VERSION_MICRO);
         MESOSPHERE_LOG("\n");
 
@@ -129,8 +114,7 @@ namespace ams::kern {
         PrintMemoryRegion("        Stack",          KMemoryLayout::GetKernelStackRegionExtents());
         PrintMemoryRegion("        Misc",           KMemoryLayout::GetKernelMiscRegionExtents());
         PrintMemoryRegion("        Slab",           KMemoryLayout::GetKernelSlabRegionExtents());
-        PrintMemoryRegion("    CoreLocalRegion",    KMemoryLayout::GetCoreLocalRegion());
-        PrintMemoryRegion("    LinearRegion",       KMemoryLayout::GetLinearRegionExtents());
+        PrintMemoryRegion("    LinearRegion",       KMemoryLayout::GetLinearRegionVirtualExtents());
         MESOSPHERE_LOG("\n");
 
         MESOSPHERE_LOG("Physical Memory Layout\n");
@@ -143,11 +127,21 @@ namespace ams::kern {
         PrintMemoryRegion("        PageTableHeap",  KMemoryLayout::GetKernelPageTableHeapRegionPhysicalExtents());
         PrintMemoryRegion("        InitPageTable",  KMemoryLayout::GetKernelInitPageTableRegionPhysicalExtents());
         PrintMemoryRegion("    MemoryPoolRegion",   KMemoryLayout::GetKernelPoolPartitionRegionPhysicalExtents());
-        PrintMemoryRegion("        System",         KMemoryLayout::GetKernelSystemPoolRegionPhysicalExtents());
-        PrintMemoryRegion("        Internal",       KMemoryLayout::GetKernelMetadataPoolRegionPhysicalExtents());
-        PrintMemoryRegion("        SystemUnsafe",   KMemoryLayout::GetKernelSystemNonSecurePoolRegionPhysicalExtents());
-        PrintMemoryRegion("        Applet",         KMemoryLayout::GetKernelAppletPoolRegionPhysicalExtents());
-        PrintMemoryRegion("        Application",    KMemoryLayout::GetKernelApplicationPoolRegionPhysicalExtents());
+        if (GetTargetFirmware() >= TargetFirmware_5_0_0) {
+            PrintMemoryRegion("        System",         KMemoryLayout::GetKernelSystemPoolRegionPhysicalExtents());
+            PrintMemoryRegion("        Management",     KMemoryLayout::GetKernelPoolManagementRegionPhysicalExtents());
+            PrintMemoryRegion("        SystemUnsafe",   KMemoryLayout::GetKernelSystemNonSecurePoolRegionPhysicalExtents());
+            PrintMemoryRegion("        Applet",         KMemoryLayout::GetKernelAppletPoolRegionPhysicalExtents());
+            PrintMemoryRegion("        Application",    KMemoryLayout::GetKernelApplicationPoolRegionPhysicalExtents());
+        } else {
+            PrintMemoryRegion("        Secure",     KMemoryLayout::GetKernelSystemPoolRegionPhysicalExtents());
+            PrintMemoryRegion("        Management", KMemoryLayout::GetKernelPoolManagementRegionPhysicalExtents());
+            PrintMemoryRegion("        Unsafe",     KMemoryLayout::GetKernelApplicationPoolRegionPhysicalExtents());
+        }
+        if constexpr (IsKTraceEnabled) {
+            MESOSPHERE_LOG("    Debug\n");
+            PrintMemoryRegion("        Trace Buffer",   KMemoryLayout::GetKernelTraceBufferRegionPhysicalExtents());
+        }
         MESOSPHERE_LOG("\n");
     }
 

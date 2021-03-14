@@ -31,7 +31,7 @@ namespace ams::patcher {
         constexpr size_t ModuleIpsPatchLength = 2 * sizeof(ro::ModuleId) + IpsFileExtensionLength;
 
         /* Global data. */
-        os::Mutex apply_patch_lock;
+        os::Mutex apply_patch_lock(false);
         u8 g_patch_read_buffer[os::MemoryPageSize];
 
         /* Helpers. */
@@ -217,7 +217,7 @@ namespace ams::patcher {
 
         /* Inspect all patches from /atmosphere/<patch_dir>/<*>/<*>.ips */
         char path[fs::EntryNameLengthMax + 1];
-        std::snprintf(path, sizeof(path), "%s:/atmosphere/%s", mount_name, patch_dir_name);
+        util::SNPrintf(path, sizeof(path), "%s:/atmosphere/%s", mount_name, patch_dir_name);
         const size_t patches_dir_path_len = std::strlen(path);
 
         /* Open the patch directory. */
@@ -237,10 +237,7 @@ namespace ams::patcher {
             }
 
             /* Print the path for this directory. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wformat-truncation"
-            std::snprintf(path + patches_dir_path_len, sizeof(path) - patches_dir_path_len, "/%s", entry.name);
-#pragma GCC diagnostic pop
+            util::SNPrintf(path + patches_dir_path_len, sizeof(path) - patches_dir_path_len, "/%s", entry.name);
             const size_t patch_dir_path_len = patches_dir_path_len + 1 + std::strlen(entry.name);
 
             /* Open the patch directory. */
@@ -262,7 +259,7 @@ namespace ams::patcher {
                 }
 
                 /* Print the path for this file. */
-                std::snprintf(path + patch_dir_path_len, sizeof(path) - patch_dir_path_len, "/%s", entry.name);
+                util::SNPrintf(path + patch_dir_path_len, sizeof(path) - patch_dir_path_len, "/%s", entry.name);
 
                 /* Open the file. */
                 fs::FileHandle file;

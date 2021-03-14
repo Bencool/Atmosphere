@@ -16,17 +16,20 @@
 #pragma once
 #include <stratosphere.hpp>
 
+#define AMS_SETTINGS_SYSTEM_MITM_INTERFACE_INFO(C, H)                                                                                                                                                                                               \
+    AMS_SF_METHOD_INFO(C, H,  3, Result, GetFirmwareVersion,       (sf::Out<ams::settings::FirmwareVersion> out),                                                                                                       (out))                      \
+    AMS_SF_METHOD_INFO(C, H,  4, Result, GetFirmwareVersion2,      (sf::Out<ams::settings::FirmwareVersion> out),                                                                                                       (out))                      \
+    AMS_SF_METHOD_INFO(C, H, 37, Result, GetSettingsItemValueSize, (sf::Out<u64> out_size, const ams::settings::fwdbg::SettingsName &name, const ams::settings::fwdbg::SettingsItemKey &key),                           (out_size, name, key))      \
+    AMS_SF_METHOD_INFO(C, H, 38, Result, GetSettingsItemValue,     (sf::Out<u64> out_size, const sf::OutBuffer &out, const ams::settings::fwdbg::SettingsName &name, const ams::settings::fwdbg::SettingsItemKey &key), (out_size, out, name, key)) \
+    AMS_SF_METHOD_INFO(C, H, 62, Result, GetDebugModeFlag,         (sf::Out<bool> out),                                                                                                                                 (out))
+
+AMS_SF_DEFINE_MITM_INTERFACE(ams::mitm::settings, ISetSysMitmInterface, AMS_SETTINGS_SYSTEM_MITM_INTERFACE_INFO)
+
 namespace ams::mitm::settings {
 
-    class SetSysMitmService  : public sf::IMitmServiceObject {
-        private:
-            enum class CommandId {
-                GetFirmwareVersion       = 3,
-                GetFirmwareVersion2      = 4,
-
-                GetSettingsItemValueSize = 37,
-                GetSettingsItemValue     = 38,
-            };
+    class SetSysMitmService  : public sf::MitmServiceImplBase {
+        public:
+            using MitmServiceImplBase::MitmServiceImplBase;
         public:
             static bool ShouldMitm(const sm::MitmProcessInfo &client_info) {
                 /* We will mitm:
@@ -35,19 +38,12 @@ namespace ams::mitm::settings {
                 return true;
             }
         public:
-            SF_MITM_SERVICE_OBJECT_CTOR(SetSysMitmService) { /* ... */ }
-        protected:
             Result GetFirmwareVersion(sf::Out<ams::settings::FirmwareVersion> out);
             Result GetFirmwareVersion2(sf::Out<ams::settings::FirmwareVersion> out);
             Result GetSettingsItemValueSize(sf::Out<u64> out_size, const ams::settings::fwdbg::SettingsName &name, const ams::settings::fwdbg::SettingsItemKey &key);
             Result GetSettingsItemValue(sf::Out<u64> out_size, const sf::OutBuffer &out, const ams::settings::fwdbg::SettingsName &name, const ams::settings::fwdbg::SettingsItemKey &key);
-        public:
-            DEFINE_SERVICE_DISPATCH_TABLE {
-                MAKE_SERVICE_COMMAND_META(GetFirmwareVersion),
-                MAKE_SERVICE_COMMAND_META(GetFirmwareVersion2),
-                MAKE_SERVICE_COMMAND_META(GetSettingsItemValueSize),
-                MAKE_SERVICE_COMMAND_META(GetSettingsItemValue),
-            };
+            Result GetDebugModeFlag(sf::Out<bool> out);
     };
+    static_assert(IsISetSysMitmInterface<SetSysMitmService>);
 
 }

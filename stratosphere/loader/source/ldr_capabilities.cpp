@@ -13,6 +13,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+#include <stratosphere.hpp>
 #include "ldr_capabilities.hpp"
 
 namespace ams::ldr::caps {
@@ -25,6 +26,7 @@ namespace ams::ldr::caps {
             SyscallMask     = 4,
             MapRange        = 6,
             MapPage         = 7,
+            MapRegion       = 10,
             InterruptPair   = 11,
             ApplicationType = 13,
             KernelVersion   = 14,
@@ -42,9 +44,11 @@ namespace ams::ldr::caps {
             constexpr ALWAYS_INLINE typename name::Type Get##name() const { return this->Get<name>(); }
 
         constexpr ALWAYS_INLINE CapabilityId GetCapabilityId(util::BitPack32 cap) {
-            using RawValue = CapabilityField<0, BITSIZEOF(u32)>;
-            return static_cast<CapabilityId>(__builtin_ctz(~cap.Get<RawValue>()));
+            return static_cast<CapabilityId>(__builtin_ctz(~cap.value));
         }
+
+        constexpr inline util::BitPack32 EmptyCapability = {~u32{}};
+        static_assert(GetCapabilityId(EmptyCapability) == CapabilityId::Empty);
 
 #define CAPABILITY_CLASS_NAME(id) Capability##id
 
@@ -53,7 +57,6 @@ namespace ams::ldr::caps {
             public:                                                                                                             \
                 static constexpr CapabilityId Id = CapabilityId::id;                                                            \
                 using IdBits   = CapabilityField<0, static_cast<size_t>(Id) + 1>;                                               \
-                using RawValue = CapabilityField<IdBits::Next, BITSIZEOF(u32) - IdBits::Next>;                                  \
                 static constexpr u32 IdBitsValue = (static_cast<u32>(1) << static_cast<size_t>(Id)) - 1;                        \
             private:                                                                                                            \
                 util::BitPack32 value;                                                                                          \
@@ -62,9 +65,9 @@ namespace ams::ldr::caps {
                 constexpr ALWAYS_INLINE typename FieldType::Type Get() const { return this->value.Get<FieldType>(); }           \
                 template<typename FieldType>                                                                                    \
                 constexpr ALWAYS_INLINE void Set(typename FieldType::Type fv) { this->value.Set<FieldType>(fv); }               \
-                constexpr ALWAYS_INLINE u32 GetValue() const { return this->Get<RawValue>(); }                                  \
+                constexpr ALWAYS_INLINE u32 GetValue() const { return this->value.value; }                                      \
             public:                                                                                                             \
-                constexpr ALWAYS_INLINE CAPABILITY_CLASS_NAME(id)(util::BitPack32 v) : value(v) { /* ... */ }                   \
+                constexpr ALWAYS_INLINE CAPABILITY_CLASS_NAME(id)(util::BitPack32 v) : value{v} { /* ... */ }                   \
                                                                                                                                 \
                 static constexpr CAPABILITY_CLASS_NAME(id) Decode(util::BitPack32 v) { return CAPABILITY_CLASS_NAME(id)(v); }   \
                                                                                                                                 \
@@ -182,6 +185,35 @@ namespace ams::ldr::caps {
             }
         );
 
+        enum class MemoryRegionType : u32 {
+            None              = 0,
+            KernelTraceBuffer = 1,
+            OnMemoryBootImage = 2,
+            DTB               = 3,
+        };
+
+        DEFINE_CAPABILITY_CLASS(MapRegion,
+            DEFINE_CAPABILITY_FIELD(Region0,   IdBits,    6, MemoryRegionType);
+            DEFINE_CAPABILITY_FIELD(ReadOnly0, Region0,   1, bool);
+            DEFINE_CAPABILITY_FIELD(Region1,   ReadOnly0, 6, MemoryRegionType);
+            DEFINE_CAPABILITY_FIELD(ReadOnly1, Region1,   1, bool);
+            DEFINE_CAPABILITY_FIELD(Region2,   ReadOnly1, 6, MemoryRegionType);
+            DEFINE_CAPABILITY_FIELD(ReadOnly2, Region2,   1, bool);
+
+            bool IsValid(const util::BitPack32 *kac, size_t kac_count) const {
+                for (size_t i = 0; i < kac_count; i++) {
+                    if (GetCapabilityId(kac[i]) == Id) {
+                        const auto restriction = Decode(kac[i]);
+
+                        if (this->GetValue() == restriction.GetValue()) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+        );
+
         DEFINE_CAPABILITY_CLASS(InterruptPair,
             DEFINE_CAPABILITY_FIELD(InterruptId0, IdBits,       10);
             DEFINE_CAPABILITY_FIELD(InterruptId1, InterruptId0, 10);
@@ -224,7 +256,7 @@ namespace ams::ldr::caps {
             }
 
             static constexpr util::BitPack32 Encode(u32 app_type) {
-                util::BitPack32 encoded(IdBitsValue);
+                util::BitPack32 encoded{IdBitsValue};
                 encoded.Set<ApplicationType>(app_type);
                 return encoded;
             }
@@ -277,7 +309,7 @@ namespace ams::ldr::caps {
             }
 
             static constexpr util::BitPack32 Encode(bool allow_debug, bool force_debug) {
-                util::BitPack32 encoded(IdBitsValue);
+                util::BitPack32 encoded{IdBitsValue};
                 encoded.Set<AllowDebug>(allow_debug);
                 encoded.Set<ForceDebug>(force_debug);
                 return encoded;
@@ -305,6 +337,7 @@ namespace ams::ldr::caps {
                 VALIDATE_CASE(KernelFlags);
                 VALIDATE_CASE(SyscallMask);
                 VALIDATE_CASE(MapPage);
+                VALIDATE_CASE(MapRegion);
                 VALIDATE_CASE(InterruptPair);
                 VALIDATE_CASE(ApplicationType);
                 VALIDATE_CASE(KernelVersion);
@@ -370,6 +403,28 @@ namespace ams::ldr::caps {
                     break;
                 case CapabilityId::DebugFlags:
                     caps[i] = CapabilityDebugFlags::Encode((flags & ProgramInfoFlag_AllowDebug) != 0, CapabilityDebugFlags::Decode(cur_cap).GetForceDebug());
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+
+    void ProcessCapabilities(void *kac, size_t kac_size) {
+        util::BitPack32 *caps = reinterpret_cast<util::BitPack32 *>(kac);
+        const size_t num_caps = kac_size / sizeof(*caps);
+
+        for (size_t i = 0; i < num_caps; i++) {
+            const auto cur_cap = caps[i];
+            switch (GetCapabilityId(cur_cap)) {
+                case CapabilityId::MapRegion:
+                    {
+                        /* MapRegion was added in 8.0.0+, and is only allowed under kernels which have the relevant mappings. */
+                        /* However, we allow it under all firmwares on mesosphere, to facilitate KTrace usage by hbl. */
+                        if (!svc::IsKTraceEnabled()) {
+                            caps[i] = EmptyCapability;
+                        }
+                    }
                     break;
                 default:
                     break;

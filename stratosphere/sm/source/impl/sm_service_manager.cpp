@@ -13,17 +13,21 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+#include <stratosphere.hpp>
 #include "sm_service_manager.hpp"
+#include "sm_wait_list.hpp"
 
 namespace ams::sm::impl {
 
-    /* Anonymous namespace for implementation details. */
     namespace {
+
         /* Constexpr definitions. */
         static constexpr size_t ProcessCountMax      = 0x40;
-        static constexpr size_t ServiceCountMax      = 0x100;
+        static constexpr size_t ServiceCountMax      = 0x100 + 0x10; /* Extra 0x10 services over Nintendo for homebrew. */
         static constexpr size_t FutureMitmCountMax   = 0x20;
         static constexpr size_t AccessControlSizeMax = 0x200;
+
+        constexpr auto InitiallyDeferredServiceName = ServiceName::Encode("fsp-srv");
 
         /* Types. */
         struct ProcessInfo {
@@ -52,21 +56,15 @@ namespace ams::sm::impl {
         struct ServiceInfo {
             ServiceName name;
             os::ProcessId owner_process_id;
-            os::ManagedHandle port_h;
-
-            /* Debug. */
-            u64 max_sessions;
-            bool is_light;
-
-            /* Mitm Extension. */
             os::ProcessId mitm_process_id;
+            os::ProcessId mitm_waiting_ack_process_id;
             os::ManagedHandle mitm_port_h;
             os::ManagedHandle mitm_query_h;
-
-            /* Acknowledgement members. */
-            bool mitm_waiting_ack;
-            os::ProcessId mitm_waiting_ack_process_id;
+            os::ManagedHandle port_h;
             os::ManagedHandle mitm_fwd_sess_h;
+            s32 max_sessions;
+            bool is_light;
+            bool mitm_waiting_ack;
 
             ServiceInfo() {
                 this->Free();
@@ -273,6 +271,9 @@ namespace ams::sm::impl {
                     g_future_mitm_list[i] = InvalidServiceName;
                 }
             }
+
+            /* This might undefer some requests. */
+            TriggerResume(service);
         }
 
         void GetServiceInfoRecord(ServiceRecord *out_record, const ServiceInfo *service_info) {
@@ -346,7 +347,7 @@ namespace ams::sm::impl {
 
             /* This is a mechanism by which certain services will always be deferred until sm:m receives a special command. */
             /* This can be extended with more services as needed at a later date. */
-            return service == ServiceName::Encode("fsp-srv");
+            return service == InitiallyDeferredServiceName;
         }
 
         Result GetMitmServiceHandleImpl(Handle *out, ServiceInfo *service_info, const MitmProcessInfo &client_info) {
@@ -408,15 +409,36 @@ namespace ams::sm::impl {
 
             /* Create the new service. */
             *out = INVALID_HANDLE;
-            R_TRY(svcCreatePort(out, free_service->port_h.GetPointerAndClear(), max_sessions, is_light, free_service->name.name));
+            Handle server_hnd = INVALID_HANDLE;
+            R_TRY(svcCreatePort(out, std::addressof(server_hnd), max_sessions, is_light, free_service->name.name));
 
             /* Save info. */
             free_service->name = service;
             free_service->owner_process_id = process_id;
             free_service->max_sessions = max_sessions;
             free_service->is_light = is_light;
+            *free_service->port_h.GetPointerAndClear() = server_hnd;
+
+            /* This might undefer some requests. */
+            TriggerResume(service);
 
             return ResultSuccess();
+        }
+
+    }
+
+    /* Client disconnection callback. */
+    void OnClientDisconnected(os::ProcessId process_id) {
+        /* Ensure that the process id is valid. */
+        if (process_id == os::InvalidProcessId) {
+            return;
+        }
+
+        /* Unregister all services a client hosts, on attached-client-close. */
+        for (size_t i = 0; i < ServiceCountMax; i++) {
+            if (g_service_list[i].name != InvalidServiceName && g_service_list[i].owner_process_id == process_id) {
+                g_service_list[i].Free();
+            }
         }
     }
 
@@ -465,8 +487,9 @@ namespace ams::sm::impl {
         R_TRY(impl::HasService(&has_service, service));
 
         /* Wait until we have the service. */
-        R_UNLESS(has_service, sf::ResultRequestDeferredByUser());
-        return ResultSuccess();
+        R_SUCCEED_IF(has_service);
+
+        return StartRegisterRetry(service);
     }
 
     Result GetServiceHandle(Handle *out, os::ProcessId process_id, ServiceName service) {
@@ -479,7 +502,7 @@ namespace ams::sm::impl {
         /* that will never register. Thus, in the interest of not breaking every single piece of homebrew */
         /* we will provide a little first class help. */
         constexpr ServiceName ApmP = ServiceName::Encode("apm:p");
-        R_UNLESS((hos::GetVersion() < hos::Version_800) || (service != ApmP), sm::ResultNotAllowed());
+        R_UNLESS((hos::GetVersion() < hos::Version_8_0_0) || (service != ApmP), sm::ResultNotAllowed());
 
         /* Check that the process is registered and allowed to get the service. */
         if (!IsInitialProcess(process_id)) {
@@ -490,10 +513,9 @@ namespace ams::sm::impl {
 
         /* Get service info. Check to see if we need to defer this until later. */
         ServiceInfo *service_info = GetServiceInfo(service);
-        R_UNLESS(service_info != nullptr,            sf::ResultRequestDeferredByUser());
-        R_UNLESS(!ShouldDeferForInit(service),       sf::ResultRequestDeferredByUser());
-        R_UNLESS(!HasFutureMitmDeclaration(service), sf::ResultRequestDeferredByUser());
-        R_UNLESS(!service_info->mitm_waiting_ack,    sf::ResultRequestDeferredByUser());
+        if (service_info == nullptr || ShouldDeferForInit(service) || HasFutureMitmDeclaration(service) || service_info->mitm_waiting_ack) {
+            return StartRegisterRetry(service);
+        }
 
         /* Get a handle from the service info. */
         R_TRY_CATCH(GetServiceHandleImpl(out, service_info, process_id)) {
@@ -559,8 +581,9 @@ namespace ams::sm::impl {
         R_TRY(impl::HasMitm(&has_mitm, service));
 
         /* Wait until we have the mitm. */
-        R_UNLESS(has_mitm, sf::ResultRequestDeferredByUser());
-        return ResultSuccess();
+        R_SUCCEED_IF(has_mitm);
+
+        return StartRegisterRetry(service);
     }
 
     Result InstallMitm(Handle *out, Handle *out_query, os::ProcessId process_id, ServiceName service) {
@@ -578,7 +601,9 @@ namespace ams::sm::impl {
         ServiceInfo *service_info = GetServiceInfo(service);
 
         /* If it doesn't exist, defer until it does. */
-        R_UNLESS(service_info != nullptr, sf::ResultRequestDeferredByUser());
+        if (service_info == nullptr) {
+            return StartRegisterRetry(service);
+        }
 
         /* Validate that the service isn't already being mitm'd. */
         R_UNLESS(!IsValidProcessId(service_info->mitm_process_id), sm::ResultAlreadyRegistered());
@@ -587,11 +612,19 @@ namespace ams::sm::impl {
         *out = INVALID_HANDLE;
         *out_query = INVALID_HANDLE;
 
+        /* If we don't have a future mitm declaration, add one. */
+        /* Client will clear this when ready to process. */
+        bool has_existing_future_declaration = HasFutureMitmDeclaration(service);
+        if (!has_existing_future_declaration) {
+            R_TRY(AddFutureMitmDeclaration(service));
+        }
+
+        auto future_guard = SCOPE_GUARD { if (!has_existing_future_declaration) { ClearFutureMitmDeclaration(service); } };
+
         /* Create mitm handles. */
         {
             os::ManagedHandle hnd, port_hnd, qry_hnd, mitm_qry_hnd;
-            u64 x = 0;
-            R_TRY(svcCreatePort(hnd.GetPointer(), port_hnd.GetPointer(), service_info->max_sessions, service_info->is_light, reinterpret_cast<char *>(&x)));
+            R_TRY(svcCreatePort(hnd.GetPointer(), port_hnd.GetPointer(), service_info->max_sessions, service_info->is_light, service_info->name.name));
             R_TRY(svcCreateSession(qry_hnd.GetPointer(), mitm_qry_hnd.GetPointer(), 0, 0));
 
             /* Copy to output. */
@@ -600,11 +633,12 @@ namespace ams::sm::impl {
             service_info->mitm_query_h = std::move(mitm_qry_hnd);
             *out = hnd.Move();
             *out_query = qry_hnd.Move();
+
+            /* This might undefer some requests. */
+            TriggerResume(service);
         }
 
-        /* Clear the future declaration, if one exists. */
-        ClearFutureMitmDeclaration(service);
-
+        future_guard.Cancel();
         return ResultSuccess();
     }
 
@@ -650,6 +684,34 @@ namespace ams::sm::impl {
         return ResultSuccess();
     }
 
+    Result ClearFutureMitm(os::ProcessId process_id, ServiceName service) {
+        /* Validate service name. */
+        R_TRY(ValidateServiceName(service));
+
+        /* Check that the process is registered and allowed to register the service. */
+        if (!IsInitialProcess(process_id)) {
+            ProcessInfo *proc = GetProcessInfo(process_id);
+            R_UNLESS(proc != nullptr, sm::ResultInvalidClient());
+            R_TRY(ValidateAccessControl(AccessControlEntry(proc->access_control, proc->access_control_size), service, true, false));
+        }
+
+        /* Check that a future mitm declaration is present or we have a mitm. */
+        if (HasMitm(service)) {
+            /* Validate that the service exists. */
+            ServiceInfo *service_info = GetServiceInfo(service);
+            R_UNLESS(service_info != nullptr, sm::ResultNotRegistered());
+
+            /* Validate that the client process_id is the mitm process. */
+            R_UNLESS(service_info->mitm_process_id == process_id, sm::ResultNotAllowed());
+        } else {
+            R_UNLESS(HasFutureMitmDeclaration(service), sm::ResultNotRegistered());
+        }
+
+        /* Clear the forward declaration. */
+        ClearFutureMitmDeclaration(service);
+        return ResultSuccess();
+    }
+
     Result AcknowledgeMitmSession(MitmProcessInfo *out_info, Handle *out_hnd, os::ProcessId process_id, ServiceName service) {
         /* Validate service name. */
         R_TRY(ValidateServiceName(service));
@@ -670,6 +732,10 @@ namespace ams::sm::impl {
 
         /* Acknowledge. */
         service_info->AcknowledgeMitmSession(out_info, out_hnd);
+
+        /* Undefer requests to the session. */
+        TriggerResume(service);
+
         return ResultSuccess();
     }
 
@@ -708,6 +774,10 @@ namespace ams::sm::impl {
     /* Deferral extension (works around FS bug). */
     Result EndInitialDefers() {
         g_ended_initial_defers = true;
+
+        /* This might undefer some requests. */
+        TriggerResume(InitiallyDeferredServiceName);
+
         return ResultSuccess();
     }
 

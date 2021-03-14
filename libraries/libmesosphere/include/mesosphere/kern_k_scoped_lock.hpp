@@ -18,27 +18,22 @@
 
 namespace ams::kern {
 
-    /*
-        TODO: C++20
+    template<typename T>
+    concept KLockable = !std::is_reference<T>::value && requires (T &t) {
+        { t.Lock()   } -> std::same_as<void>;
+        { t.Unlock() } -> std::same_as<void>;
+    };
 
-        template<typename T>
-        concept KLockable = !std::is_reference<T>::value && requires (T &t) {
-            { t.Lock()   } -> std::same_as<void>;
-            { t.Unlock() } -> std::same_as<void>;
-        };
-
-    */
-
-    template<typename T> /* TODO C++20: requires KLockable<T> */
+    template<typename T> requires KLockable<T>
     class KScopedLock {
         NON_COPYABLE(KScopedLock);
         NON_MOVEABLE(KScopedLock);
         private:
-            T *lock_ptr;
+            T &m_lock;
         public:
-            explicit ALWAYS_INLINE KScopedLock(T *l) : lock_ptr(l) { this->lock_ptr->Lock(); }
-            explicit ALWAYS_INLINE KScopedLock(T &l) : KScopedLock(std::addressof(l)) { /* ... */ }
-            ALWAYS_INLINE ~KScopedLock() { this->lock_ptr->Unlock(); }
+            explicit ALWAYS_INLINE KScopedLock(T &l) : m_lock(l) { m_lock.Lock(); }
+            explicit ALWAYS_INLINE KScopedLock(T *l) : KScopedLock(*l) { /* ... */ }
+            ALWAYS_INLINE ~KScopedLock() { m_lock.Unlock(); }
     };
 
 }

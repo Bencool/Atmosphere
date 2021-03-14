@@ -2,23 +2,26 @@
 import sys, os
 from struct import pack as pk, unpack as up
 
+def atmosphere_target_firmware(major, minor, micro, rev = 0):
+    return (major << 24) | (minor << 16) | (micro << 8) | rev
+
 def align_up(val, algn):
     val += algn - 1
     return val - (val % algn)
 
 
 def main(argc, argv):
-    if argc != 1:
-        print('Usage: %s' % argv[0])
+    if argc != 4:
+        print('Usage: %s kernel_ldr.bin kernel.bin output.bin' % argv[0])
         return 1
-    with open('kernel_ldr/kernel_ldr.bin', 'rb') as f:
+    with open(argv[1], 'rb') as f:
         kernel_ldr = f.read()
-    with open('kernel/kernel.bin', 'rb') as f:
+    with open(argv[2], 'rb') as f:
         kernel = f.read()
     kernel_metadata_offset = 4
     assert (kernel_metadata_offset <= len(kernel) - 0x40)
     assert (kernel[kernel_metadata_offset:kernel_metadata_offset + 4] == b'MSS0')
-    kernel_end = up('<I', kernel[kernel_metadata_offset + 0x34:kernel_metadata_offset + 0x38])[0]
+    kernel_end = up('<I', kernel[kernel_metadata_offset + 0x38:kernel_metadata_offset + 0x3C])[0]
     assert (kernel_end >= len(kernel))
 
     embedded_ini = b''
@@ -34,10 +37,10 @@ def main(argc, argv):
     kernel_ldr_end    = kernel_ldr_offset + len(kernel_ldr)
     mesosphere_end    = align_up(kernel_ldr_end, 0x1000)
 
-    with open('mesosphere.bin', 'wb') as f:
+    with open(argv[3], 'wb') as f:
         f.write(kernel[:kernel_metadata_offset + 4])
-        f.write(pk('<QQ', embedded_ini_offset, kernel_ldr_offset))
-        f.write(kernel[kernel_metadata_offset + 0x14:])
+        f.write(pk('<QQI', embedded_ini_offset, kernel_ldr_offset, atmosphere_target_firmware(10, 1, 0)))
+        f.write(kernel[kernel_metadata_offset + 0x18:])
         f.seek(embedded_ini_offset)
         f.write(embedded_ini)
         f.seek(embedded_ini_end)

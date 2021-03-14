@@ -16,31 +16,43 @@
 #pragma once
 #include <stratosphere.hpp>
 #include "os_rng_manager_impl.hpp"
+#include "os_thread_manager_types.hpp"
 #include "os_tick_manager_impl.hpp"
+#include "os_aslr_space_manager_types.hpp"
 
 namespace ams::os::impl {
 
     class OsResourceManager {
         private:
             RngManager  rng_manager{};
+            AslrSpaceManager aslr_space_manager;
+            /* TODO */
+            ThreadManager thread_manager{};
             /* TODO */
             TickManager tick_manager{};
             /* TODO */
         public:
-            constexpr OsResourceManager() = default;
+            OsResourceManager() = default;
 
             constexpr ALWAYS_INLINE RngManager &GetRngManager() { return this->rng_manager; }
+            constexpr ALWAYS_INLINE AslrSpaceManager &GetAslrSpaceManager() { return this->aslr_space_manager; }
+            constexpr ALWAYS_INLINE ThreadManager &GetThreadManager() { return this->thread_manager; }
             constexpr ALWAYS_INLINE TickManager &GetTickManager() { return this->tick_manager; }
     };
 
     class ResourceManagerHolder {
         private:
-            static /* TODO: C++20 constinit */ OsResourceManager s_resource_manager;
+            static TYPED_STORAGE(OsResourceManager) s_resource_manager_storage;
         private:
             constexpr ResourceManagerHolder() { /* ... */ }
         public:
+            static ALWAYS_INLINE void InitializeResourceManagerInstance() {
+                /* Construct the resource manager instance. */
+                new (GetPointer(s_resource_manager_storage)) OsResourceManager;
+            }
+
             static ALWAYS_INLINE OsResourceManager &GetResourceManagerInstance() {
-                return s_resource_manager;
+                return GetReference(s_resource_manager_storage);
             }
     };
 

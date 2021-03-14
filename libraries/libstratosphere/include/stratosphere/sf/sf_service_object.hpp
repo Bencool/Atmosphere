@@ -15,48 +15,40 @@
  */
 
 #pragma once
-#include "sf_common.hpp"
-#include "sf_out.hpp"
+#include <stratosphere/sf/sf_common.hpp>
+#include <stratosphere/sf/sf_out.hpp>
+#include <stratosphere/sf/sf_shared_object.hpp>
 
 namespace ams::sf {
 
-    class IServiceObject {
+    class IServiceObject : public ISharedObject {
         public:
             virtual ~IServiceObject() { /* ... */ }
     };
 
+    template<typename T>
+    concept IsServiceObject = std::derived_from<T, IServiceObject>;
+
     class IMitmServiceObject : public IServiceObject {
+        public:
+            virtual ~IMitmServiceObject() { /* ... */ }
+    };
+
+    class MitmServiceImplBase {
         protected:
             std::shared_ptr<::Service> forward_service;
             sm::MitmProcessInfo client_info;
         public:
-            IMitmServiceObject(std::shared_ptr<::Service> &&s, const sm::MitmProcessInfo &c) : forward_service(std::move(s)), client_info(c) { /* ... */ }
-
-            virtual ~IMitmServiceObject() { /* ... */ }
-
-            static bool ShouldMitm(os::ProcessId process_id, ncm::ProgramId program_id);
+            MitmServiceImplBase(std::shared_ptr<::Service> &&s, const sm::MitmProcessInfo &c) : forward_service(std::move(s)), client_info(c) { /* ... */ }
     };
-
-    /* Utility. */
-    #define SF_MITM_SERVICE_OBJECT_CTOR(cls) cls(std::shared_ptr<::Service> &&s, const sm::MitmProcessInfo &c) : ::ams::sf::IMitmServiceObject(std::forward<std::shared_ptr<::Service>>(s), c)
 
     template<typename T>
-    struct ServiceObjectTraits {
-        static_assert(std::is_base_of<ams::sf::IServiceObject, T>::value, "ServiceObjectTraits requires ServiceObject");
+    concept IsMitmServiceObject = IsServiceObject<T> && std::derived_from<T, IMitmServiceObject>;
 
-        static constexpr bool IsMitmServiceObject = std::is_base_of<IMitmServiceObject, T>::value;
-
-        struct SharedPointerHelper {
-
-            static constexpr void EmptyDelete(T *) { /* Empty deleter, for fake shared pointer. */ }
-
-            static constexpr std::shared_ptr<T> GetEmptyDeleteSharedPointer(T *srv_obj) {
-                return std::shared_ptr<T>(srv_obj, EmptyDelete);
-            }
-
-        };
+    template<typename T>
+    concept IsMitmServiceImpl = requires (std::shared_ptr<::Service> &&s, const sm::MitmProcessInfo &c) {
+        { T(std::forward<std::shared_ptr<::Service>>(s), c) };
+        { T::ShouldMitm(c) } -> std::same_as<bool>;
     };
-
-
 
 }

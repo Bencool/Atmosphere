@@ -61,7 +61,7 @@ namespace ams::sf::cmif {
             return this->handler;
         }
     };
-    static_assert(std::is_pod<ServiceCommandMeta>::value && sizeof(ServiceCommandMeta) == 0x10, "sizeof(ServiceCommandMeta)");
+    static_assert(util::is_pod<ServiceCommandMeta>::value && sizeof(ServiceCommandMeta) == 0x18, "sizeof(ServiceCommandMeta)");
 
     namespace impl {
 
@@ -84,18 +84,14 @@ namespace ams::sf::cmif {
                 }
         };
 
-        template<size_t N, class = std::make_index_sequence<N>>
-        class ServiceDispatchTableImpl;
-
-        template<size_t N, size_t... Is>
-        class ServiceDispatchTableImpl<N, std::index_sequence<Is...>> : public ServiceDispatchTableBase {
-            private:
-                template<size_t>
-                using EntryType = ServiceCommandMeta;
+        template<size_t N>
+        class ServiceDispatchTableImpl : public ServiceDispatchTableBase {
+            public:
+                static constexpr size_t NumEntries = N;
             private:
                 const std::array<ServiceCommandMeta, N> entries;
             public:
-                explicit constexpr ServiceDispatchTableImpl(EntryType<Is>... args) : entries { args... } { /* ... */ }
+                explicit constexpr ServiceDispatchTableImpl(const std::array<ServiceCommandMeta, N> &e) : entries{e} { /* ... */ }
 
                 Result ProcessMessage(ServiceDispatchContext &ctx, const cmif::PointerAndSize &in_raw_data) const {
                     return this->ProcessMessageImpl(ctx, in_raw_data, this->entries.data(), this->entries.size());
@@ -104,19 +100,19 @@ namespace ams::sf::cmif {
                 Result ProcessMessageForMitm(ServiceDispatchContext &ctx, const cmif::PointerAndSize &in_raw_data) const {
                     return this->ProcessMessageForMitmImpl(ctx, in_raw_data, this->entries.data(), this->entries.size());
                 }
+
+                constexpr const std::array<ServiceCommandMeta, N> &GetEntries() const {
+                    return this->entries;
+                }
         };
 
     }
 
-    template<typename ...Entries>
-    class ServiceDispatchTable : public impl::ServiceDispatchTableImpl<sizeof...(Entries)> {
+    template<size_t N>
+    class ServiceDispatchTable : public impl::ServiceDispatchTableImpl<N> {
         public:
-            explicit constexpr ServiceDispatchTable(Entries... entries) : impl::ServiceDispatchTableImpl<sizeof...(Entries)>(entries...) { /* ... */ }
+            explicit constexpr ServiceDispatchTable(const std::array<ServiceCommandMeta, N> &e) : impl::ServiceDispatchTableImpl<N>(e) { /* ... */ }
     };
-
-    #define DEFINE_SERVICE_DISPATCH_TABLE \
-    template<typename ServiceImpl> \
-    static constexpr inline ::ams::sf::cmif::ServiceDispatchTable s_CmifServiceDispatchTable
 
     struct ServiceDispatchMeta {
         const impl::ServiceDispatchTableBase *DispatchTable;
@@ -127,23 +123,31 @@ namespace ams::sf::cmif {
         }
     };
 
-    template<typename T>
+    template<typename T> requires sf::IsServiceObject<T>
     struct ServiceDispatchTraits {
-        static_assert(std::is_base_of<sf::IServiceObject, T>::value, "ServiceObjects must derive from sf::IServiceObject");
-
         using ProcessHandlerType = decltype(ServiceDispatchMeta::ProcessHandler);
 
         static constexpr inline auto DispatchTable = T::template s_CmifServiceDispatchTable<T>;
         using DispatchTableType = decltype(DispatchTable);
 
-        static constexpr ProcessHandlerType ProcessHandlerImpl = ServiceObjectTraits<T>::IsMitmServiceObject ? (&impl::ServiceDispatchTableBase::ProcessMessageForMitm<DispatchTableType>)
-                                                                                                             : (&impl::ServiceDispatchTableBase::ProcessMessage<DispatchTableType>);
+        static constexpr ProcessHandlerType ProcessHandlerImpl = sf::IsMitmServiceObject<T> ? (&impl::ServiceDispatchTableBase::ProcessMessageForMitm<DispatchTableType>)
+                                                                                            : (&impl::ServiceDispatchTableBase::ProcessMessage<DispatchTableType>);
 
         static constexpr inline ServiceDispatchMeta Meta{&DispatchTable, ProcessHandlerImpl};
     };
 
+    template<>
+    struct ServiceDispatchTraits<sf::IServiceObject> {
+        static constexpr inline auto DispatchTable = ServiceDispatchTable<0>(std::array<ServiceCommandMeta, 0>{});
+    };
+
+    template<>
+    struct ServiceDispatchTraits<sf::IMitmServiceObject> {
+        static constexpr inline auto DispatchTable = ServiceDispatchTable<0>(std::array<ServiceCommandMeta, 0>{});
+    };
+
     template<typename T>
-    NX_CONSTEXPR const ServiceDispatchMeta *GetServiceDispatchMeta() {
+    constexpr ALWAYS_INLINE const ServiceDispatchMeta *GetServiceDispatchMeta() {
         return &ServiceDispatchTraits<T>::Meta;
     }
 

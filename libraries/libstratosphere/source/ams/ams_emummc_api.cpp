@@ -13,7 +13,6 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-
 #include <stratosphere.hpp>
 
 namespace ams::emummc {
@@ -58,10 +57,10 @@ namespace ams::emummc {
         };
 
         /* Globals. */
-        os::Mutex g_lock;
-        ExosphereConfig g_exo_config;
-        bool g_is_emummc;
-        bool g_has_cached;
+        constinit os::SdkMutex g_lock;
+        constinit ExosphereConfig g_exo_config;
+        constinit bool g_is_emummc;
+        constinit bool g_has_cached;
 
         /* Helpers. */
         void CacheValues() {
@@ -87,22 +86,17 @@ namespace ams::emummc {
                 const Storage storage = static_cast<Storage>(g_exo_config.base_cfg.type);
                 g_is_emummc = g_exo_config.base_cfg.magic == StorageMagic && storage != Storage_Emmc;
 
-                /* Format paths. Ignore string format warnings. */
-                #pragma GCC diagnostic push
-                #pragma GCC diagnostic ignored "-Wformat-truncation"
-                {
-                    if (storage == Storage_SdFile) {
-                        std::snprintf(g_exo_config.file_cfg.path, sizeof(g_exo_config.file_cfg.path), "/%s", paths->file_path);
-                    }
-
-                    std::snprintf(g_exo_config.emu_dir_path, sizeof(g_exo_config.emu_dir_path), "/%s", paths->nintendo_path);
-
-                    /* If we're emummc, implement default nintendo redirection path. */
-                    if (g_is_emummc && std::strcmp(g_exo_config.emu_dir_path, "/") == 0) {
-                        std::snprintf(g_exo_config.emu_dir_path, sizeof(g_exo_config.emu_dir_path), "/emummc/Nintendo_%04x", g_exo_config.base_cfg.id);
-                    }
+                /* Format paths. */
+                if (storage == Storage_SdFile) {
+                    util::SNPrintf(g_exo_config.file_cfg.path, sizeof(g_exo_config.file_cfg.path), "/%s", paths->file_path);
                 }
-                #pragma GCC diagnostic pop
+
+                util::SNPrintf(g_exo_config.emu_dir_path, sizeof(g_exo_config.emu_dir_path), "/%s", paths->nintendo_path);
+
+                /* If we're emummc, implement default nintendo redirection path. */
+                if (g_is_emummc && std::strcmp(g_exo_config.emu_dir_path, "/") == 0) {
+                    util::SNPrintf(g_exo_config.emu_dir_path, sizeof(g_exo_config.emu_dir_path), "/emummc/Nintendo_%04x", g_exo_config.base_cfg.id);
+                }
             }
 
             g_has_cached = true;
@@ -114,6 +108,12 @@ namespace ams::emummc {
     bool IsActive() {
         CacheValues();
         return g_is_emummc;
+    }
+
+    /* Get the active emummc id. */
+    u32 GetActiveId() {
+        CacheValues();
+        return g_exo_config.base_cfg.id;
     }
 
     /* Get Nintendo redirection path. */

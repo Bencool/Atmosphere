@@ -30,11 +30,14 @@ namespace ams::ldr {
         void *aci_fah;
         void *aci_sac;
         void *aci_kac;
+
+        void *modulus;
+        bool check_verification_data;
     };
 
     /* Meta API. */
-    Result LoadMeta(Meta *out_meta, ncm::ProgramId program_id, const cfg::OverrideStatus &status);
-    Result LoadMetaFromCache(Meta *out_meta, ncm::ProgramId program_id, const cfg::OverrideStatus &status);
+    Result LoadMeta(Meta *out_meta, const ncm::ProgramLocation &loc, const cfg::OverrideStatus &status);
+    Result LoadMetaFromCache(Meta *out_meta, const ncm::ProgramLocation &loc, const cfg::OverrideStatus &status);
     void   InvalidateMetaCache();
 
 }

@@ -64,7 +64,7 @@ namespace ams::kern {
 
             static constexpr u32 GetCapabilityId(CapabilityType type) {
                 const u32 flag = GetCapabilityFlag(type);
-                if (true /* C++20: std::is_constant_evaluated() */) {
+                if (std::is_constant_evaluated()) {
                     return CountTrailingZero(flag);
                 } else {
                     return static_cast<u32>(__builtin_ctz(flag));
@@ -84,7 +84,7 @@ namespace ams::kern {
             template<CapabilityType Type>
             static constexpr inline u32 CapabilityId = []() -> u32 {
                 const u32 flag = static_cast<u32>(Type) + 1;
-                if (true /* C++20: std::is_constant_evaluated() */) {
+                if (std::is_constant_evaluated()) {
                     for (u32 i = 0; i < BITSIZEOF(u32); i++) {
                         if (flag & (1u << i)) {
                             return i;
@@ -200,14 +200,14 @@ namespace ams::kern {
                                                        CapabilityFlag<CapabilityType::HandleTable>   |
                                                        CapabilityFlag<CapabilityType::DebugFlags>;
         private:
-            u8 svc_access_flags[SvcFlagCount]{};
-            u8 irq_access_flags[IrqFlagCount]{};
-            u64 core_mask{};
-            u64 priority_mask{};
-            util::BitPack32 debug_capabilities;
-            s32 handle_table_size{};
-            util::BitPack32 intended_kernel_version;
-            u32 program_type{};
+            u8 m_svc_access_flags[SvcFlagCount]{};
+            u8 m_irq_access_flags[IrqFlagCount]{};
+            u64 m_core_mask{};
+            u64 m_priority_mask{};
+            util::BitPack32 m_debug_capabilities{0};
+            s32 m_handle_table_size{};
+            util::BitPack32 m_intended_kernel_version{0};
+            u32 m_program_type{};
         private:
             static constexpr ALWAYS_INLINE void SetSvcAllowedImpl(u8 *data, u32 id) {
                 constexpr size_t BitsPerWord = BITSIZEOF(*data);
@@ -221,19 +221,25 @@ namespace ams::kern {
                 data[id / BitsPerWord] &= ~(1ul << (id % BitsPerWord));
             }
 
+            static constexpr ALWAYS_INLINE bool GetSvcAllowedImpl(u8 *data, u32 id) {
+                constexpr size_t BitsPerWord = BITSIZEOF(*data);
+                MESOSPHERE_ASSERT(id < svc::SvcId_Count);
+                return (data[id / BitsPerWord] & (1ul << (id % BitsPerWord))) != 0;
+            }
+
             bool SetSvcAllowed(u32 id) {
-                if (id < BITSIZEOF(this->svc_access_flags)) {
-                    SetSvcAllowedImpl(this->svc_access_flags, id);
+                if (id < BITSIZEOF(m_svc_access_flags)) {
+                    SetSvcAllowedImpl(m_svc_access_flags, id);
                     return true;
                 } else {
                     return false;
                 }
             }
 
-            bool SetInterruptAllowed(u32 id) {
-                constexpr size_t BitsPerWord = BITSIZEOF(this->irq_access_flags[0]);
-                if (id < BITSIZEOF(this->irq_access_flags)) {
-                    this->irq_access_flags[id / BitsPerWord] = (1ul << (id % BitsPerWord));
+            bool SetInterruptPermitted(u32 id) {
+                constexpr size_t BitsPerWord = BITSIZEOF(m_irq_access_flags[0]);
+                if (id < BITSIZEOF(m_irq_access_flags)) {
+                    m_irq_access_flags[id / BitsPerWord] |= (1ul << (id % BitsPerWord));
                     return true;
                 } else {
                     return false;
@@ -253,28 +259,105 @@ namespace ams::kern {
 
             Result SetCapability(const util::BitPack32 cap, u32 &set_flags, u32 &set_svc, KProcessPageTable *page_table);
             Result SetCapabilities(const u32 *caps, s32 num_caps, KProcessPageTable *page_table);
+            Result SetCapabilities(svc::KUserPointer<const u32 *> user_caps, s32 num_caps, KProcessPageTable *page_table);
         public:
-            constexpr KCapabilities() : debug_capabilities(0), intended_kernel_version(0) { /* ... */ }
+            constexpr KCapabilities() = default;
 
             Result Initialize(const u32 *caps, s32 num_caps, KProcessPageTable *page_table);
+            Result Initialize(svc::KUserPointer<const u32 *> user_caps, s32 num_caps, KProcessPageTable *page_table);
 
-            constexpr u64 GetCoreMask() const { return this->core_mask; }
-            constexpr u64 GetPriorityMask() const { return this->priority_mask; }
-            constexpr s32 GetHandleTableSize() const { return this->handle_table_size; }
+            constexpr u64 GetCoreMask() const { return m_core_mask; }
+            constexpr u64 GetPriorityMask() const { return m_priority_mask; }
+            constexpr s32 GetHandleTableSize() const { return m_handle_table_size; }
 
             ALWAYS_INLINE void CopySvcPermissionsTo(KThread::StackParameters &sp) const {
-                static_assert(sizeof(svc_access_flags) == sizeof(sp.svc_permission));
-                std::memcpy(sp.svc_permission, this->svc_access_flags, sizeof(this->svc_access_flags));
+                static_assert(sizeof(m_svc_access_flags) == sizeof(sp.svc_permission));
+                /* Copy permissions. */
+                std::memcpy(sp.svc_permission, m_svc_access_flags, sizeof(m_svc_access_flags));
 
                 /* Clear specific SVCs based on our state. */
                 ClearSvcAllowedImpl(sp.svc_permission, svc::SvcId_ReturnFromException);
                 ClearSvcAllowedImpl(sp.svc_permission, svc::SvcId_SynchronizePreemptionState);
-                if (sp.is_preemption_state_pinned) {
+                if (sp.is_pinned) {
                     ClearSvcAllowedImpl(sp.svc_permission, svc::SvcId_GetInfo);
                 }
             }
 
-            /* TODO: Member functions. */
+            ALWAYS_INLINE void CopyPinnedSvcPermissionsTo(KThread::StackParameters &sp) const {
+                static_assert(sizeof(m_svc_access_flags) == sizeof(sp.svc_permission));
+                /* Clear all permissions. */
+                std::memset(sp.svc_permission, 0, sizeof(m_svc_access_flags));
+
+                /* Set specific SVCs based on our state. */
+                SetSvcAllowedImpl(sp.svc_permission, svc::SvcId_SynchronizePreemptionState);
+                if (GetSvcAllowedImpl(sp.svc_permission, svc::SvcId_ReturnFromException)) {
+                    SetSvcAllowedImpl(sp.svc_permission, svc::SvcId_ReturnFromException);
+                    SetSvcAllowedImpl(sp.svc_permission, svc::SvcId_GetInfo);
+                }
+            }
+
+            ALWAYS_INLINE void CopyUnpinnedSvcPermissionsTo(KThread::StackParameters &sp) const {
+                static_assert(sizeof(m_svc_access_flags) == sizeof(sp.svc_permission));
+                /* Get whether we have access to return from exception. */
+                const bool return_from_exception = GetSvcAllowedImpl(sp.svc_permission, svc::SvcId_ReturnFromException);
+
+                /* Copy permissions. */
+                std::memcpy(sp.svc_permission, m_svc_access_flags, sizeof(m_svc_access_flags));
+
+                /* Clear/Set specific SVCs based on our state. */
+                ClearSvcAllowedImpl(sp.svc_permission, svc::SvcId_ReturnFromException);
+                ClearSvcAllowedImpl(sp.svc_permission, svc::SvcId_SynchronizePreemptionState);
+                if (return_from_exception) {
+                    SetSvcAllowedImpl(sp.svc_permission, svc::SvcId_ReturnFromException);
+                }
+            }
+
+            ALWAYS_INLINE void CopyEnterExceptionSvcPermissionsTo(KThread::StackParameters &sp) {
+                static_assert(sizeof(m_svc_access_flags) == sizeof(sp.svc_permission));
+
+                /* Set ReturnFromException if allowed. */
+                if (GetSvcAllowedImpl(m_svc_access_flags, svc::SvcId_ReturnFromException)) {
+                    SetSvcAllowedImpl(sp.svc_permission, svc::SvcId_ReturnFromException);
+                }
+
+                /* Set GetInfo if allowed. */
+                if (GetSvcAllowedImpl(m_svc_access_flags, svc::SvcId_GetInfo)) {
+                    SetSvcAllowedImpl(sp.svc_permission, svc::SvcId_GetInfo);
+                }
+            }
+
+            ALWAYS_INLINE void CopyLeaveExceptionSvcPermissionsTo(KThread::StackParameters &sp) {
+                static_assert(sizeof(m_svc_access_flags) == sizeof(sp.svc_permission));
+
+                /* Clear ReturnFromException. */
+                ClearSvcAllowedImpl(sp.svc_permission, svc::SvcId_ReturnFromException);
+
+                /* If pinned, clear GetInfo. */
+                if (sp.is_pinned) {
+                    ClearSvcAllowedImpl(sp.svc_permission, svc::SvcId_GetInfo);
+                }
+            }
+
+            constexpr bool IsPermittedInterrupt(u32 id) const {
+                constexpr size_t BitsPerWord = BITSIZEOF(m_irq_access_flags[0]);
+                if (id < BITSIZEOF(m_irq_access_flags)) {
+                    return (m_irq_access_flags[id / BitsPerWord] & (1ul << (id % BitsPerWord))) != 0;
+                } else {
+                    return false;
+                }
+            }
+
+            constexpr bool IsPermittedDebug() const {
+                return m_debug_capabilities.Get<DebugFlags::AllowDebug>();
+            }
+
+            constexpr bool CanForceDebug() const {
+                return m_debug_capabilities.Get<DebugFlags::ForceDebug>();
+            }
+
+            constexpr u32 GetIntendedKernelMajorVersion() const { return m_intended_kernel_version.Get<KernelVersion::MajorVersion>(); }
+            constexpr u32 GetIntendedKernelMinorVersion() const { return m_intended_kernel_version.Get<KernelVersion::MinorVersion>(); }
+            constexpr u32 GetIntendedKernelVersion() const { return ams::svc::EncodeKernelVersion(this->GetIntendedKernelMajorVersion(), this->GetIntendedKernelMinorVersion()); }
     };
 
 }

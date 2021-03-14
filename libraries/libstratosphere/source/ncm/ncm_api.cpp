@@ -20,23 +20,25 @@ namespace ams::ncm {
 
     namespace {
 
-        std::shared_ptr<IContentManager> g_content_manager;
+        sf::SharedPointer<IContentManager> g_content_manager;
+
+        sf::UnmanagedServiceObject<IContentManager, RemoteContentManagerImpl> g_remote_manager_impl;
 
     }
 
     void Initialize() {
         AMS_ASSERT(g_content_manager == nullptr);
         R_ABORT_UNLESS(ncmInitialize());
-        g_content_manager = std::make_shared<RemoteContentManagerImpl>();
+        g_content_manager = g_remote_manager_impl.GetShared();
     }
 
     void Finalize() {
         AMS_ASSERT(g_content_manager != nullptr);
-        g_content_manager.reset();
+        g_content_manager.Reset();
         ncmExit();
     }
 
-    void InitializeWithObject(std::shared_ptr<IContentManager> manager_object) {
+    void InitializeWithObject(sf::SharedPointer<IContentManager> manager_object) {
         AMS_ASSERT(g_content_manager == nullptr);
         g_content_manager = manager_object;
         AMS_ASSERT(g_content_manager != nullptr);
@@ -60,18 +62,18 @@ namespace ams::ncm {
     }
 
     Result OpenContentStorage(ContentStorage *out, StorageId storage_id) {
-        sf::cmif::ServiceObjectHolder object_holder;
-        R_TRY(g_content_manager->OpenContentStorage(std::addressof(object_holder), storage_id));
+        sf::SharedPointer<IContentStorage> content_storage;
+        R_TRY(g_content_manager->OpenContentStorage(std::addressof(content_storage), storage_id));
 
-        *out = ContentStorage(object_holder.GetServiceObject<IContentStorage>());
+        *out = ContentStorage(std::move(content_storage));
         return ResultSuccess();
     }
 
     Result OpenContentMetaDatabase(ContentMetaDatabase *out, StorageId storage_id) {
-        sf::cmif::ServiceObjectHolder object_holder;
-        R_TRY(g_content_manager->OpenContentMetaDatabase(std::addressof(object_holder), storage_id));
+        sf::SharedPointer<IContentMetaDatabase> content_db;
+        R_TRY(g_content_manager->OpenContentMetaDatabase(std::addressof(content_db), storage_id));
 
-        *out = ContentMetaDatabase(object_holder.GetServiceObject<IContentMetaDatabase>());
+        *out = ContentMetaDatabase(std::move(content_db));
         return ResultSuccess();
     }
 
@@ -88,10 +90,14 @@ namespace ams::ncm {
     }
 
     Result ActivateContentMetaDatabase(StorageId storage_id) {
+        /* On < 2.0.0, this command doesn't exist, and databases are activated as needed on open. */
+        R_SUCCEED_IF(hos::GetVersion() < hos::Version_2_0_0);
         return g_content_manager->ActivateContentMetaDatabase(storage_id);
     }
 
     Result InactivateContentMetaDatabase(StorageId storage_id) {
+        /* On < 2.0.0, this command doesn't exist. */
+        R_SUCCEED_IF(hos::GetVersion() < hos::Version_2_0_0);
         return g_content_manager->InactivateContentMetaDatabase(storage_id);
     }
 
@@ -101,12 +107,12 @@ namespace ams::ncm {
 
     /* Deprecated API. */
     Result CloseContentStorageForcibly(StorageId storage_id) {
-        AMS_ABORT_UNLESS(hos::GetVersion() == hos::Version_100);
+        AMS_ABORT_UNLESS(hos::GetVersion() == hos::Version_1_0_0);
         return g_content_manager->CloseContentStorageForcibly(storage_id);
     }
 
     Result CloseContentMetaDatabaseForcibly(StorageId storage_id) {
-        AMS_ABORT_UNLESS(hos::GetVersion() == hos::Version_100);
+        AMS_ABORT_UNLESS(hos::GetVersion() == hos::Version_1_0_0);
         return g_content_manager->CloseContentMetaDatabaseForcibly(storage_id);
     }
 }

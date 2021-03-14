@@ -13,6 +13,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+#include <stratosphere.hpp>
 #include "fatal_task_screen.hpp"
 #include "fatal_config.hpp"
 #include "fatal_font.hpp"
@@ -20,7 +21,6 @@
 namespace ams::fatal::srv {
 
     /* Include Atmosphere logo into its own anonymous namespace. */
-
     namespace {
 
         #include "fatal_ams_logo.inc"
@@ -38,6 +38,25 @@ namespace ams::fatal::srv {
         constexpr u32 FatalScreenWidthAlignedBytes = (FatalScreenWidth * FatalScreenBpp + 63) & ~63;
         constexpr u32 FatalScreenWidthAligned = FatalScreenWidthAlignedBytes / FatalScreenBpp;
 
+        /* There should only be a single transfer memory (for nv). */
+        alignas(os::MemoryPageSize) constinit u8 g_nv_transfer_memory[0x40000];
+
+        /* There should only be a single (1280*768) framebuffer. */
+        alignas(os::MemoryPageSize) constinit u8 g_framebuffer_memory[FatalScreenWidthAlignedBytes * util::AlignUp(FatalScreenHeight, 128)];
+
+    }
+
+}
+
+extern "C" ::Result __nx_nv_create_tmem(TransferMemory *t, u32 *out_size, Permission perm) {
+    *out_size = sizeof(ams::fatal::srv::g_nv_transfer_memory);
+    return tmemCreateFromMemory(t, ams::fatal::srv::g_nv_transfer_memory, sizeof(ams::fatal::srv::g_nv_transfer_memory), perm);
+}
+
+namespace ams::fatal::srv {
+
+    namespace {
+
         /* Pixel calculation helper. */
         constexpr u32 GetPixelOffset(u32 x, u32 y) {
             u32 tmp_pos = ((y & 127) / 16) + (x/32*8) + ((y/16/8)*(((FatalScreenWidthAligned/2)/16*8)));
@@ -54,11 +73,14 @@ namespace ams::fatal::srv {
                 ViDisplay display;
                 ViLayer layer;
                 NWindow win;
-                Framebuffer fb;
+                NvMap map;
             private:
                 Result SetupDisplayInternal();
                 Result SetupDisplayExternal();
                 Result PrepareScreenForDrawing();
+                void   PreRenderFrameBuffer();
+                Result InitializeNativeWindow();
+                void   DisplayPreRenderedFrame();
                 Result ShowFatal();
             public:
                 virtual Result Run() override;
@@ -93,7 +115,7 @@ namespace ams::fatal::srv {
             ON_SCOPE_EXIT { viCloseDisplay(&temp_display); };
 
             /* Turn on the screen. */
-            if (hos::GetVersion() >= hos::Version_300) {
+            if (hos::GetVersion() >= hos::Version_3_0_0) {
                 R_TRY(viSetDisplayPowerState(&temp_display, ViPowerState_On));
             } else {
                 /* Prior to 3.0.0, the ViPowerState enum was different (0 = Off, 1 = On). */
@@ -141,7 +163,7 @@ namespace ams::fatal::srv {
             R_TRY(viGetDisplayLogicalResolution(&this->display, &display_width, &display_height));
 
             /* viSetDisplayMagnification was added in 3.0.0. */
-            if (hos::GetVersion() >= hos::Version_300) {
+            if (hos::GetVersion() >= hos::Version_3_0_0) {
                 R_TRY(viSetDisplayMagnification(&this->display, 0, 0, display_width, display_height));
             }
 
@@ -153,15 +175,15 @@ namespace ams::fatal::srv {
                 /* Display a layer of 1280 x 720 at 1.5x magnification */
                 /* NOTE: N uses 2 (770x400) RGBA4444 buffers (tiled buffer + linear). */
                 /* We use a single 1280x720 tiled RGB565 buffer. */
-                constexpr s32 raw_width = FatalScreenWidth;
-                constexpr s32 raw_height = FatalScreenHeight;
-                constexpr s32 layer_width = ((raw_width) * 3) / 2;
-                constexpr s32 layer_height = ((raw_height) * 3) / 2;
+                constexpr s32 RawWidth = FatalScreenWidth;
+                constexpr s32 RawHeight = FatalScreenHeight;
+                constexpr s32 LayerWidth = ((RawWidth) * 3) / 2;
+                constexpr s32 LayerHeight = ((RawHeight) * 3) / 2;
 
-                const float layer_x = static_cast<float>((display_width - layer_width) / 2);
-                const float layer_y = static_cast<float>((display_height - layer_height) / 2);
+                const float layer_x = static_cast<float>((display_width - LayerWidth) / 2);
+                const float layer_y = static_cast<float>((display_height - LayerHeight) / 2);
 
-                R_TRY(viSetLayerSize(&this->layer, layer_width, layer_height));
+                R_TRY(viSetLayerSize(&this->layer, LayerWidth, LayerHeight));
 
                 /* Set the layer's Z at display maximum, to be above everything else .*/
                 R_TRY(viSetLayerZ(&this->layer, FatalLayerZ));
@@ -171,30 +193,28 @@ namespace ams::fatal::srv {
 
                 /* Create framebuffer. */
                 R_TRY(nwindowCreateFromLayer(&this->win, &this->layer));
-                R_TRY(framebufferCreate(&this->fb, &this->win, raw_width, raw_height, PIXEL_FORMAT_RGB_565, 1));
+                R_TRY(this->InitializeNativeWindow());
             }
 
             return ResultSuccess();
         }
 
-        Result ShowFatalTask::ShowFatal() {
+        void ShowFatalTask::PreRenderFrameBuffer() {
             const FatalConfig &config = GetFatalConfig();
 
-            /* Prepare screen for drawing. */
-            sm::DoWithSession([&]() {
-                R_ABORT_UNLESS(PrepareScreenForDrawing());
-            });
+            /* Pre-render the image into the static framebuffer. */
+            u16 *tiled_buf = reinterpret_cast<u16 *>(g_framebuffer_memory);
 
-            /* Dequeue a buffer. */
-            u16 *tiled_buf = reinterpret_cast<u16 *>(framebufferBegin(&this->fb, NULL));
-            R_UNLESS(tiled_buf != nullptr, ResultNullGraphicsBuffer());
+            /* Temporarily use the NV transfer memory as font backing heap. */
+            font::SetHeapMemory(g_nv_transfer_memory, sizeof(g_nv_transfer_memory));
+            ON_SCOPE_EXIT { std::memset(g_nv_transfer_memory, 0, sizeof(g_nv_transfer_memory)); };
 
             /* Let the font manager know about our framebuffer. */
             font::ConfigureFontFramebuffer(tiled_buf, GetPixelOffset);
             font::SetFontColor(0xFFFF);
 
             /* Draw a background. */
-            for (size_t i = 0; i < this->fb.fb_size / sizeof(*tiled_buf); i++) {
+            for (size_t i = 0; i < sizeof(g_framebuffer_memory) / sizeof(*tiled_buf); i++) {
                 tiled_buf[i] = 0x39C9;
             }
 
@@ -213,18 +233,20 @@ namespace ams::fatal::srv {
             font::AddSpacingLines(0.5f);
             font::PrintFormatLine(  "Program:  %016lX", static_cast<u64>(this->context->program_id));
             font::AddSpacingLines(0.5f);
-            font::PrintFormatLine(u8"Firmware: %s (Atmosphère %u.%u.%u-%s)", config.GetFirmwareVersion().display_version, ATMOSPHERE_RELEASE_VERSION, ams::GetGitRevision());
+
+            /* TODO: Remove Mesosphere identifier in 1.0.0. */
+            font::PrintFormatLine("Firmware: %s (Atmosphère%s %u.%u.%u-%s)", config.GetFirmwareVersion().display_version, svc::IsKernelMesosphere() ? " M" : "", ATMOSPHERE_RELEASE_VERSION, ams::GetGitRevision());
             font::AddSpacingLines(1.5f);
             if (!exosphere::ResultVersionMismatch::Includes(this->context->result)) {
                 font::Print(config.GetErrorDescription());
             } else {
                 /* Print a special message for atmosphere version mismatch. */
-                font::Print(u8"Atmosphère version mismatch detected.\n\n"
-                                   u8"Please press the POWER Button to restart the console normally, or a VOL button\n"
-                                   u8"to reboot to a payload (or RCM, if none is present). If you are unable to\n"
-                                   u8"restart the console, hold the POWER Button for 12 seconds to turn the console off.\n\n"
-                                   u8"Please ensure that all Atmosphère components are updated.\n"
-                                   u8"github.com/Atmosphere-NX/Atmosphere/releases\n");
+                font::Print("Atmosphère version mismatch detected.\n\n"
+                                   "Please press the POWER Button to restart the console normally, or a VOL button\n"
+                                   "to reboot to a payload (or RCM, if none is present). If you are unable to\n"
+                                   "restart the console, hold the POWER Button for 12 seconds to turn the console off.\n\n"
+                                   "Please ensure that all Atmosphère components are updated.\n"
+                                   "github.com/Atmosphere-NX/Atmosphere/releases\n");
             }
 
             /* Add a line. */
@@ -409,16 +431,72 @@ namespace ams::fatal::srv {
                     }
                 }
             }
+        }
 
-            /* Enqueue the buffer. */
-            framebufferEnd(&fb);
+        Result ShowFatalTask::InitializeNativeWindow() {
+            /* Setup nv driver. */
+            R_TRY(nvInitialize());
+            R_TRY(nvMapInit());
+            R_TRY(nvFenceInit());
+
+            /* Create nvmap. */
+            R_TRY(nvMapCreate(&this->map, g_framebuffer_memory, sizeof(g_framebuffer_memory), 0x20000, NvKind_Pitch, true));
+
+            /* Setup graphics buffer. */
+            {
+                NvGraphicBuffer grbuf               = {};
+                grbuf.header.num_ints               = (sizeof(NvGraphicBuffer) - sizeof(NativeHandle)) / 4;
+                grbuf.unk0                          = -1;
+                grbuf.magic                         = 0xDAFFCAFF;
+                grbuf.pid                           = 42;
+                grbuf.usage                         = GRALLOC_USAGE_HW_COMPOSER | GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_TEXTURE;
+                grbuf.format                        = PIXEL_FORMAT_RGB_565;
+                grbuf.ext_format                    = PIXEL_FORMAT_RGB_565;
+                grbuf.num_planes                    = 1;
+                grbuf.planes[0].width               = FatalScreenWidth;
+                grbuf.planes[0].height              = FatalScreenHeight;
+                grbuf.planes[0].color_format        = NvColorFormat_R5G6B5;
+                grbuf.planes[0].layout              = NvLayout_BlockLinear;
+                grbuf.planes[0].kind                = NvKind_Generic_16BX2;
+                grbuf.planes[0].block_height_log2   = 4;
+                grbuf.nvmap_id                      = nvMapGetId(&this->map);
+                grbuf.stride                        = FatalScreenWidthAligned;
+                grbuf.total_size                    = sizeof(g_framebuffer_memory);
+                grbuf.planes[0].pitch               = FatalScreenWidthAlignedBytes;
+                grbuf.planes[0].size                = sizeof(g_framebuffer_memory);
+                grbuf.planes[0].offset              = 0;
+
+                R_TRY(nwindowConfigureBuffer(&this->win, 0, &grbuf));
+            }
+
+            return ResultSuccess();
+        }
+
+        void ShowFatalTask::DisplayPreRenderedFrame() {
+            s32 slot;
+            R_ABORT_UNLESS(nwindowDequeueBuffer(&this->win, &slot, nullptr));
+            dd::FlushDataCache(g_framebuffer_memory, sizeof(g_framebuffer_memory));
+            R_ABORT_UNLESS(nwindowQueueBuffer(&this->win, this->win.cur_slot, NULL));
+        }
+
+        Result ShowFatalTask::ShowFatal() {
+            /* Pre-render the framebuffer. */
+            PreRenderFrameBuffer();
+
+            /* Prepare screen for drawing. */
+            sm::DoWithSession([&]() {
+                R_ABORT_UNLESS(PrepareScreenForDrawing());
+            });
+
+            /* Display the pre-rendered frame. */
+            this->DisplayPreRenderedFrame();
 
             return ResultSuccess();
         }
 
         Result ShowFatalTask::Run() {
             /* Don't show the fatal error screen until we've verified the battery is okay. */
-            eventWait(const_cast<Event *>(&this->context->battery_event), U64_MAX);
+            this->context->battery_event->Wait();
 
             return ShowFatal();
         }

@@ -35,6 +35,7 @@ namespace ams::pm::impl {
                 Flag_Application            = (1 << 6),
                 Flag_SignalOnStart          = (1 << 7),
                 Flag_StartedStateChanged    = (1 << 8),
+                Flag_UnhandledException     = (1 << 9),
             };
         private:
             util::IntrusiveListNode list_node;
@@ -43,9 +44,9 @@ namespace ams::pm::impl {
             const ncm::ProgramLocation loc;
             const cfg::OverrideStatus status;
             Handle handle;
-            ProcessState state;
+            svc::ProcessState state;
             u32 flags;
-            os::WaitableHolder waitable_holder;
+            os::WaitableHolderType waitable_holder;
         private:
             void SetFlag(Flag flag) {
                 this->flags |= flag;
@@ -63,8 +64,8 @@ namespace ams::pm::impl {
             ~ProcessInfo();
             void Cleanup();
 
-            void LinkToWaitableManager(os::WaitableManager &manager) {
-                manager.LinkWaitableHolder(&this->waitable_holder);
+            void LinkToWaitableManager(os::WaitableManagerType &manager) {
+                os::LinkWaitableHolder(std::addressof(manager), std::addressof(this->waitable_holder));
             }
 
             Handle GetHandle() const {
@@ -87,20 +88,20 @@ namespace ams::pm::impl {
                 return this->status;
             }
 
-            ProcessState GetState() const {
+            svc::ProcessState GetState() const {
                 return this->state;
             }
 
-            void SetState(ProcessState state) {
+            void SetState(svc::ProcessState state) {
                 this->state = state;
             }
 
             bool HasStarted() const {
-                return this->state != ProcessState_Created && this->state != ProcessState_CreatedAttached;
+                return this->state != svc::ProcessState_Created && this->state != svc::ProcessState_CreatedAttached;
             }
 
-            bool HasExited() const {
-                return this->state == ProcessState_Exited;
+            bool HasTerminated() const {
+                return this->state == svc::ProcessState_Terminated;
             }
 
 #define DEFINE_FLAG_SET(flag) \
@@ -124,13 +125,18 @@ namespace ams::pm::impl {
             /* This needs a manual setter, because it sets two flags. */
             void SetExceptionOccurred() {
                 this->SetFlag(Flag_ExceptionOccurred);
-                this->SetFlag(Flag_ExceptionWaitingAttach);
+                this->SetFlag(Flag_UnhandledException);
             }
 
             DEFINE_FLAG_GET(Has, ExceptionOccurred)
             DEFINE_FLAG_GET(Has, ExceptionWaitingAttach)
+            DEFINE_FLAG_GET(Has, UnhandledException)
+
+            DEFINE_FLAG_SET(ExceptionWaitingAttach)
+
             DEFINE_FLAG_CLEAR(ExceptionOccurred)
             DEFINE_FLAG_CLEAR(ExceptionWaitingAttach)
+            DEFINE_FLAG_CLEAR(UnhandledException)
 
             DEFINE_FLAG_SET(SignalOnDebugEvent)
             DEFINE_FLAG_GET(Should, SignalOnDebugEvent)
@@ -163,6 +169,8 @@ namespace ams::pm::impl {
         private:
             os::Mutex lock;
         public:
+            constexpr ProcessList() : lock(false) { /* ... */ }
+
             void Lock() {
                 this->lock.Lock();
             }

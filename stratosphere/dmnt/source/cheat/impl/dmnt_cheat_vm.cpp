@@ -13,7 +13,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-#include <sys/stat.h>
+#include <stratosphere.hpp>
 #include "dmnt_cheat_vm.hpp"
 #include "dmnt_cheat_api.hpp"
 
@@ -26,7 +26,7 @@ namespace ams::dmnt::cheat::impl {
         fs::FileHandle log_file;
         {
             char log_path[fs::EntryNameLengthMax + 1];
-            std::snprintf(log_path, sizeof(log_path), "sdmc:/atmosphere/cheat_vm_logs/%08x.log", log_id);
+            util::SNPrintf(log_path, sizeof(log_path), "sdmc:/atmosphere/cheat_vm_logs/%08x.log", log_id);
             if (R_FAILED(fs::OpenFile(std::addressof(log_file), log_path, fs::OpenMode_Write | fs::OpenMode_AllowAppend))) {
                 return;
             }
@@ -39,7 +39,7 @@ namespace ams::dmnt::cheat::impl {
         }
 
         char log_value[18];
-        std::snprintf(log_value, sizeof(log_value), "%016lx\n", value);
+        util::SNPrintf(log_value, sizeof(log_value), "%016lx\n", value);
         fs::WriteFile(log_file, log_offset, log_value, std::strlen(log_value), fs::WriteOption::Flush);
     }
 
@@ -69,7 +69,7 @@ namespace ams::dmnt::cheat::impl {
         {
             std::va_list vl;
             va_start(vl, format);
-            std::vsnprintf(this->debug_log_format_buf, sizeof(this->debug_log_format_buf) - 1, format, vl);
+            util::VSNPrintf(this->debug_log_format_buf, sizeof(this->debug_log_format_buf) - 1, format, vl);
             va_end(vl);
         }
 
@@ -236,6 +236,22 @@ namespace ams::dmnt::cheat::impl {
                 for (size_t i = 0; i < NumRegisters; i++) {
                     this->LogToDebugFile("Act[%02x]:   %d\n", i, opcode->save_restore_regmask.should_operate[i]);
                 }
+                break;
+            case CheatVmOpcodeType_ReadWriteStaticRegister:
+                this->LogToDebugFile("Opcode: Read/Write Static Register\n");
+                if (opcode->rw_static_reg.static_idx < NumReadableStaticRegisters) {
+                    this->LogToDebugFile("Op Type: ReadStaticRegister\n");
+                } else {
+                    this->LogToDebugFile("Op Type: WriteStaticRegister\n");
+                }
+                this->LogToDebugFile("Reg Idx:   %x\n", opcode->rw_static_reg.idx);
+                this->LogToDebugFile("Stc Idx:   %x\n", opcode->rw_static_reg.static_idx);
+                break;
+            case CheatVmOpcodeType_PauseProcess:
+                this->LogToDebugFile("Opcode: Pause Cheat Process\n");
+                break;
+            case CheatVmOpcodeType_ResumeProcess:
+                this->LogToDebugFile("Opcode: Resume Cheat Process\n");
                 break;
             case CheatVmOpcodeType_DebugLog:
                 this->LogToDebugFile("Opcode: Debug Log\n");
@@ -568,6 +584,30 @@ namespace ams::dmnt::cheat::impl {
                     for (size_t i = 0; i < NumRegisters; i++) {
                         opcode.save_restore_regmask.should_operate[i] = (first_dword & (1u << i)) != 0;
                     }
+                }
+                break;
+            case CheatVmOpcodeType_ReadWriteStaticRegister:
+                {
+                    /* C3000XXx */
+                    /* C3 = opcode 0xC3. */
+                    /* XX = static register index. */
+                    /* x  = register index. */
+                    opcode.rw_static_reg.static_idx = ((first_dword >> 4) & 0xFF);
+                    opcode.rw_static_reg.idx        = (first_dword & 0xF);
+                }
+                break;
+            case CheatVmOpcodeType_PauseProcess:
+                {
+                    /* FF0????? */
+                    /* FF0 = opcode 0xFF0 */
+                    /* Pauses the current process. */
+                }
+                break;
+            case CheatVmOpcodeType_ResumeProcess:
+                {
+                    /* FF1????? */
+                    /* FF1 = opcode 0xFF1 */
+                    /* Resumes the current process. */
                 }
                 break;
             case CheatVmOpcodeType_DebugLog:
@@ -1173,6 +1213,21 @@ namespace ams::dmnt::cheat::impl {
                             }
                         }
                     }
+                    break;
+                case CheatVmOpcodeType_ReadWriteStaticRegister:
+                    if (cur_opcode.rw_static_reg.static_idx < NumReadableStaticRegisters) {
+                        /* Load a register with a static register. */
+                        this->registers[cur_opcode.rw_static_reg.idx] = this->static_registers[cur_opcode.rw_static_reg.static_idx];
+                    } else {
+                        /* Store a register to a static register. */
+                        this->static_registers[cur_opcode.rw_static_reg.static_idx] = this->registers[cur_opcode.rw_static_reg.idx];
+                    }
+                    break;
+                case CheatVmOpcodeType_PauseProcess:
+                    dmnt::cheat::impl::PauseCheatProcessUnsafe();
+                    break;
+                case CheatVmOpcodeType_ResumeProcess:
+                    dmnt::cheat::impl::ResumeCheatProcessUnsafe();
                     break;
                 case CheatVmOpcodeType_DebugLog:
                     {

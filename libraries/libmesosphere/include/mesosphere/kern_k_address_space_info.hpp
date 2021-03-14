@@ -22,9 +22,9 @@ namespace ams::kern {
     struct KAddressSpaceInfo {
         public:
             enum Type {
-                Type_32Bit      = 0,
-                Type_Small64Bit = 1,
-                Type_Large64Bit = 2,
+                Type_MapSmall   = 0,
+                Type_MapLarge   = 1,
+                Type_Map39Bit   = 2,
                 Type_Heap       = 3,
                 Type_Stack      = 4,
                 Type_Alias      = 5,
@@ -32,20 +32,20 @@ namespace ams::kern {
                 Type_Count,
             };
         private:
-            size_t bit_width;
-            size_t address;
-            size_t size;
-            Type type;
+            size_t m_bit_width;
+            size_t m_address;
+            size_t m_size;
+            Type m_type;
         public:
             static uintptr_t GetAddressSpaceStart(size_t width, Type type);
             static size_t GetAddressSpaceSize(size_t width, Type type);
 
-            constexpr KAddressSpaceInfo(size_t bw, size_t a, size_t s, Type t) : bit_width(bw), address(a), size(s), type(t) { /* ... */ }
+            constexpr KAddressSpaceInfo(size_t bw, size_t a, size_t s, Type t) : m_bit_width(bw), m_address(a), m_size(s), m_type(t) { /* ... */ }
 
-            constexpr size_t GetWidth() const { return this->bit_width; }
-            constexpr size_t GetAddress() const { return this->address; }
-            constexpr size_t GetSize() const { return this->size; }
-            constexpr Type GetType() const { return this->type; }
+            constexpr size_t GetWidth() const { return m_bit_width; }
+            constexpr size_t GetAddress() const { return m_address; }
+            constexpr size_t GetSize() const { return m_size; }
+            constexpr Type GetType() const { return m_type; }
     };
 
 }

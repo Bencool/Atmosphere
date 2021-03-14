@@ -58,7 +58,7 @@ namespace ams::ncm {
             R_SUCCEED_IF(max_level <= 0);
 
             /* On 1.0.0, NotRequireFileSize was not a valid open mode. */
-            const auto open_dir_mode = hos::GetVersion() >= hos::Version_200 ? (fs::OpenDirectoryMode_All | fs::OpenDirectoryMode_NotRequireFileSize) : (fs::OpenDirectoryMode_All);
+            const auto open_dir_mode = hos::GetVersion() >= hos::Version_2_0_0 ? (fs::OpenDirectoryMode_All | fs::OpenDirectoryMode_NotRequireFileSize) : (fs::OpenDirectoryMode_All);
 
             /* Retry traversal upon request. */
             bool retry_dir_read = true;
@@ -153,7 +153,7 @@ namespace ams::ncm {
         }
 
         Result CleanDirectoryRecursively(const PathString &path) {
-            if (hos::GetVersion() >= hos::Version_300) {
+            if (hos::GetVersion() >= hos::Version_3_0_0) {
                 R_TRY(fs::CleanDirectoryRecursively(path));
             } else {
                 /* CleanDirectoryRecursively didn't exist on < 3.0.0, so we will polyfill it. */
@@ -292,7 +292,7 @@ namespace ams::ncm {
         return ResultSuccess();
     }
 
-    Result ContentStorageImpl::WritePlaceHolder(PlaceHolderId placeholder_id, s64 offset, sf::InBuffer data) {
+    Result ContentStorageImpl::WritePlaceHolder(PlaceHolderId placeholder_id, s64 offset, const sf::InBuffer &data) {
         /* Ensure offset is valid. */
         R_UNLESS(offset >= 0, ncm::ResultInvalidOffset());
         R_TRY(this->EnsureEnabled());
@@ -551,7 +551,7 @@ namespace ams::ncm {
         return this->placeholder_accessor.SetPlaceHolderFileSize(placeholder_id, size);
     }
 
-    Result ContentStorageImpl::ReadContentIdFile(sf::OutBuffer buf, ContentId content_id, s64 offset) {
+    Result ContentStorageImpl::ReadContentIdFile(const sf::OutBuffer &buf, ContentId content_id, s64 offset) {
         /* Ensure offset is valid. */
         R_UNLESS(offset >= 0, ncm::ResultInvalidOffset());
         R_TRY(this->EnsureEnabled());
@@ -621,13 +621,13 @@ namespace ams::ncm {
         return ResultSuccess();
     }
 
-    Result ContentStorageImpl::WriteContentForDebug(ContentId content_id, s64 offset, sf::InBuffer data) {
+    Result ContentStorageImpl::WriteContentForDebug(ContentId content_id, s64 offset, const sf::InBuffer &data) {
         /* Ensure offset is valid. */
         R_UNLESS(offset >= 0, ncm::ResultInvalidOffset());
         R_TRY(this->EnsureEnabled());
 
         /* This command is for development hardware only. */
-        AMS_ABORT_UNLESS(spl::IsDevelopmentHardware());
+        AMS_ABORT_UNLESS(spl::IsDevelopment());
 
         /* Close any cached file. */
         this->InvalidateFileCache();

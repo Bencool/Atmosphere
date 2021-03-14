@@ -21,7 +21,7 @@ namespace ams::ncm {
 
         void GetStringFromBytes(char *dst, const void *src, size_t count) {
             for (size_t i = 0; i < count; i++) {
-                std::snprintf(dst + 2 * i, 3, "%02x", static_cast<const u8 *>(src)[i]);
+                util::SNPrintf(dst + 2 * i, 3, "%02x", static_cast<const u8 *>(src)[i]);
             }
         }
 
@@ -48,7 +48,6 @@ namespace ams::ncm {
 
     }
 
-
     ContentIdString GetContentIdString(ContentId id) {
         ContentIdString str;
         GetStringFromContentId(str.data, sizeof(str), id);
@@ -58,6 +57,25 @@ namespace ams::ncm {
     void GetStringFromContentId(char *dst, size_t dst_size, ContentId id) {
         AMS_ABORT_UNLESS(dst_size > ContentIdStringLength);
         GetStringFromBytes(dst, std::addressof(id), sizeof(id));
+    }
+
+    void GetStringFromRightsId(char *dst, size_t dst_size, fs::RightsId id) {
+        AMS_ABORT_UNLESS(dst_size > RightsIdStringLength);
+        GetStringFromBytes(dst, std::addressof(id), sizeof(id));
+    }
+
+    void GetTicketFileStringFromRightsId(char *dst, size_t dst_size, fs::RightsId id) {
+        AMS_ABORT_UNLESS(dst_size > TicketFileStringLength);
+        ContentIdString str;
+        GetStringFromRightsId(str.data, sizeof(str), id);
+        util::SNPrintf(dst, dst_size, "%s.tik", str.data);
+    }
+
+    void GetCertificateFileStringFromRightsId(char *dst, size_t dst_size, fs::RightsId id) {
+        AMS_ABORT_UNLESS(dst_size > CertFileStringLength);
+        ContentIdString str;
+        GetStringFromRightsId(str.data, sizeof(str), id);
+        util::SNPrintf(dst, dst_size, "%s.cert", str.data);
     }
 
     std::optional<ContentId> GetContentIdFromString(const char *str, size_t len) {

@@ -6,7 +6,7 @@
 [subrepo]
 	remote = https://github.com/Atmosphere-NX/Atmosphere-libs
 	branch = master
-	commit = a4ce117292cc86e951d82666f4e13bc1dc40443f
-	parent = 95d5375158f6df5376ce876e6ed8c22150ad88ff
+	commit = bc08912dd31bb172467add8e24b4f0adac431939
+	parent = 71add1add8521e0c2115ec612c514400ac7ba688
 	method = merge
 	cmdver = 0.4.1

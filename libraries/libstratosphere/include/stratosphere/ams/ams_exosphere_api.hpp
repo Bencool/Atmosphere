@@ -23,9 +23,15 @@ namespace ams::exosphere {
 
     void ForceRebootToRcm();
     void ForceRebootToIramPayload();
+    void ForceRebootToFatalError();
     void ForceShutdown();
 
     bool IsRcmBugPatched();
+
+    bool ShouldBlankProdInfo();
+    bool ShouldAllowWritesToProdInfo();
+
+    u64 GetDeviceId();
 
     void CopyToIram(uintptr_t iram_dst, const void *dram_src, size_t size);
     void CopyFromIram(void *dram_dst, uintptr_t iram_src, size_t size);

@@ -13,7 +13,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-#include "../amsmitm_debug.hpp"
+#include <stratosphere.hpp>
 #include "../amsmitm_fs_utils.hpp"
 #include "settings_sd_kvs.hpp"
 
@@ -42,7 +42,7 @@ namespace ams::settings::fwdbg {
             }
         };
 
-        static_assert(std::is_pod<SdKeyValueStoreEntry>::value);
+        static_assert(util::is_pod<SdKeyValueStoreEntry>::value);
 
         constexpr inline bool operator==(const SdKeyValueStoreEntry &lhs, const SdKeyValueStoreEntry &rhs) {
             if (lhs.HasValue() != rhs.HasValue()) {
@@ -310,9 +310,12 @@ namespace ams::settings::fwdbg {
             /* Disable uploading error reports to Nintendo. */
             R_ABORT_UNLESS(ParseSettingsItemValue("eupld", "upload_enabled", "u8!0x0"));
 
+            /* Enable USB 3.0 superspeed for homebrew */
+            R_ABORT_UNLESS(ParseSettingsItemValue("usb", "usb30_force_enabled", spl::IsUsb30ForceEnabled() ? "u8!0x1" : "u8!0x0"));
+
             /* Control whether RO should ease its validation of NROs. */
             /* (note: this is normally not necessary, and ips patches can be used.) */
-            R_ABORT_UNLESS(ParseSettingsItemValue("ro", "ease_nro_restriction", "u8!0x0"));
+            R_ABORT_UNLESS(ParseSettingsItemValue("ro", "ease_nro_restriction", "u8!0x1"));
 
             /* Atmosphere custom settings. */
 
@@ -327,10 +330,6 @@ namespace ams::settings::fwdbg {
             /* Enable writing to BIS partitions for HBL. */
             /* This is probably undesirable for normal usage. */
             R_ABORT_UNLESS(ParseSettingsItemValue("atmosphere", "enable_hbl_bis_write", "u8!0x0"));
-
-            /* Enable HBL to read the CAL0 partition. */
-            /* This is probably undesirable for normal usage. */
-            R_ABORT_UNLESS(ParseSettingsItemValue("atmosphere", "enable_hbl_cal_read", "u8!0x0"));
 
             /* Controls whether dmnt cheats should be toggled on or off by */
             /* default. 1 = toggled on by default, 0 = toggled off by default. */
@@ -348,11 +347,28 @@ namespace ams::settings::fwdbg {
             /* If you do not know what you are doing, do not touch this yet. */
             R_ABORT_UNLESS(ParseSettingsItemValue("atmosphere", "fsmitm_redirect_saves_to_sd", "u8!0x0"));
 
-            /* Controls whether to enable the deprecated hid mitm */
-            /* to fix compatibility with old homebrew. */
-            /* 0 = Do not enable, 1 = Enable. */
-            /* Please note this setting may be removed in a future release of Atmosphere. */
-            R_ABORT_UNLESS(ParseSettingsItemValue("atmosphere", "enable_deprecated_hid_mitm", "u8!0x0"));
+            /* Controls whether am sees system settings "DebugModeFlag" as */
+            /* enabled or disabled. */
+            /* 0 = Disabled (not debug mode), 1 = Enabled (debug mode) */
+            R_ABORT_UNLESS(ParseSettingsItemValue("atmosphere", "enable_am_debug_mode", "u8!0x0"));
+
+            /* Controls whether dns.mitm is enabled. */
+            /* 0 = Disabled, 1 = Enabled */
+            R_ABORT_UNLESS(ParseSettingsItemValue("atmosphere", "enable_dns_mitm", "u8!0x1"));
+
+            /* Controls whether dns.mitm uses the default redirections in addition to */
+            /* whatever is specified in the user's hosts file. */
+            /* 0 = Disabled (use hosts file contents), 1 = Enabled (use defaults and hosts file contents) */
+            R_ABORT_UNLESS(ParseSettingsItemValue("atmosphere", "add_defaults_to_dns_hosts", "u8!0x1"));
+
+            /* Controls whether dns.mitm logs to the sd card for debugging. */
+            /* 0 = Disabled, 1 = Enabled */
+            R_ABORT_UNLESS(ParseSettingsItemValue("atmosphere", "enable_dns_mitm_debug_log", "u8!0x0"));
+
+            /* Controls whether htc is enabled. */
+            /* TODO: Change this to default 1 when tma2 is ready for inclusion in atmosphere releases. */
+            /* 0 = Disabled, 1 = Enabled */
+            R_ABORT_UNLESS(ParseSettingsItemValue("atmosphere", "enable_htc", "u8!0x0"));
 
             /* Hbloader custom settings. */
 
@@ -375,10 +391,7 @@ namespace ams::settings::fwdbg {
         LoadDefaultCustomSettings();
 
         /* Parse custom settings off the SD card. */
-        const Result parse_result = LoadSdCardKeyValueStore();
-        if (R_FAILED(parse_result)) {
-            ams::mitm::ThrowResultForDebug(parse_result);
-        }
+        R_ABORT_UNLESS(LoadSdCardKeyValueStore());
 
         /* Determine how many custom settings are present. */
         for (size_t i = 0; i < util::size(g_entries); i++) {

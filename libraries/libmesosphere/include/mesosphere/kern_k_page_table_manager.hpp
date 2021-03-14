@@ -24,7 +24,7 @@ namespace ams::kern {
 
         class PageTablePage {
             private:
-                u8 buffer[PageSize];
+                u8 m_buffer[PageSize];
         };
         static_assert(sizeof(PageTablePage) == PageSize);
 
@@ -38,32 +38,32 @@ namespace ams::kern {
         private:
             using BaseHeap = KDynamicSlabHeap<impl::PageTablePage>;
         private:
-            RefCount *ref_counts;
+            RefCount *m_ref_counts;
         public:
             static constexpr size_t CalculateReferenceCountSize(size_t size) {
                 return (size / PageSize) * sizeof(RefCount);
             }
         public:
-            constexpr KPageTableManager() : BaseHeap(), ref_counts() { /* ... */ }
+            constexpr KPageTableManager() : BaseHeap(), m_ref_counts() { /* ... */ }
         private:
             void Initialize(RefCount *rc) {
-                this->ref_counts = rc;
+                m_ref_counts = rc;
                 for (size_t i = 0; i < this->GetSize() / PageSize; i++) {
-                    this->ref_counts[i] = 0;
+                    m_ref_counts[i] = 0;
                 }
             }
 
             constexpr RefCount *GetRefCountPointer(KVirtualAddress addr) const {
-                return std::addressof(this->ref_counts[(addr - this->GetAddress()) / PageSize]);
+                return std::addressof(m_ref_counts[(addr - this->GetAddress()) / PageSize]);
             }
         public:
-            void Initialize(KDynamicPageManager *next_allocator, RefCount *rc) {
-                BaseHeap::Initialize(next_allocator);
+            void Initialize(KDynamicPageManager *page_allocator, RefCount *rc) {
+                BaseHeap::Initialize(page_allocator);
                 this->Initialize(rc);
             }
 
-            void Initialize(KVirtualAddress memory, size_t sz, RefCount *rc) {
-                BaseHeap::Initialize(memory, sz);
+            void Initialize(KDynamicPageManager *page_allocator, size_t object_count, RefCount *rc) {
+                BaseHeap::Initialize(page_allocator, object_count);
                 this->Initialize(rc);
             }
 
@@ -72,6 +72,10 @@ namespace ams::kern {
             }
 
             void Free(KVirtualAddress addr) {
+                /* Ensure all pages in the heap are zero. */
+                cpu::ClearPageToZero(GetVoidPointer(addr));
+
+                /* Free the page. */
                 BaseHeap::Free(GetPointer<impl::PageTablePage>(addr));
             }
 

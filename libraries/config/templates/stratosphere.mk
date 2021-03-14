@@ -15,7 +15,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
-export DEFINES     = $(ATMOSPHERE_DEFINES) -DATMOSPHERE_IS_STRATOSPHERE
+export DEFINES     = $(ATMOSPHERE_DEFINES) -DATMOSPHERE_IS_STRATOSPHERE -D_GNU_SOURCE
 export SETTINGS    = $(ATMOSPHERE_SETTINGS) -O2
 export CFLAGS      = $(ATMOSPHERE_CFLAGS) $(SETTINGS) $(DEFINES) $(INCLUDE)
 export CXXFLAGS    = $(CFLAGS) $(ATMOSPHERE_CXXFLAGS)
@@ -36,7 +36,7 @@ export CXXWRAPS := -Wl,--wrap,__cxa_pure_virtual \
 			-Wl,--wrap,_ZSt20__throw_length_errorPKc \
 			-Wl,--wrap,_ZNSt11logic_errorC2EPKc
 
-export LDFLAGS     = -specs=$(DEVKITPRO)/libnx/switch.specs $(SETTINGS) $(CXXWRAPS) -Wl,-Map,$(notdir $*.map)
+export LDFLAGS     = -specs=$(ATMOSPHERE_LIBRARIES_DIR)/libstratosphere/stratosphere.specs -specs=$(DEVKITPRO)/libnx/switch.specs $(SETTINGS) $(CXXWRAPS) -Wl,-Map,$(notdir $*.map)
 
 export LIBS	= -lstratosphere -lnx
 

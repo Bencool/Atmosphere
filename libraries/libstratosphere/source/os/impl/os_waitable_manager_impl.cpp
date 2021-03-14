@@ -13,109 +13,134 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+#include <stratosphere.hpp>
 #include "os_waitable_manager_impl.hpp"
 #include "os_waitable_object_list.hpp"
+#include "os_tick_manager.hpp"
 
-namespace ams::os::impl{
+namespace ams::os::impl {
 
-    WaitableHolderBase *WaitableManagerImpl::WaitAnyImpl(bool infinite, u64 timeout) {
-        /* Set processing thread handle while in scope. */
-        this->waiting_thread_handle = threadGetCurHandle();
-        ON_SCOPE_EXIT { this->waiting_thread_handle = INVALID_HANDLE; };
-
+    Result WaitableManagerImpl::WaitAnyImpl(WaitableHolderBase **out, bool infinite, TimeSpan timeout, bool reply, Handle reply_target) {
         /* Prepare for processing. */
         this->signaled_holder = nullptr;
-        WaitableHolderBase *result = this->LinkHoldersToObjectList();
+        this->target_impl.SetCurrentThreadHandleForCancelWait();
+        WaitableHolderBase *holder = this->LinkHoldersToObjectList();
 
         /* Check if we've been signaled. */
         {
-            std::scoped_lock lk(this->lock);
+            std::scoped_lock lk(this->cs_wait);
             if (this->signaled_holder != nullptr) {
-                result = this->signaled_holder;
+                holder = this->signaled_holder;
             }
         }
 
         /* Process object array. */
-        if (result == nullptr) {
-            result = this->WaitAnyHandleImpl(infinite, timeout);
+        Result wait_result = ResultSuccess();
+        if (holder != nullptr) {
+            if (reply && reply_target != svc::InvalidHandle) {
+                s32 index;
+                wait_result = this->target_impl.TimedReplyAndReceive(std::addressof(index), nullptr, 0, 0, reply_target, TimeSpan::FromNanoSeconds(0));
+                if (R_FAILED(wait_result)) {
+                    holder = nullptr;
+                }
+            }
+        } else {
+            wait_result = this->WaitAnyHandleImpl(std::addressof(holder), infinite, timeout, reply, reply_target);
         }
 
         /* Unlink holders from the current object list. */
         this->UnlinkHoldersFromObjectList();
 
-        return result;
+        this->target_impl.ClearCurrentThreadHandleForCancelWait();
+
+        /* Set output holder. */
+        *out = holder;
+
+        return wait_result;
     }
 
-    WaitableHolderBase *WaitableManagerImpl::WaitAnyHandleImpl(bool infinite, u64 timeout) {
+    Result WaitableManagerImpl::WaitAnyHandleImpl(WaitableHolderBase **out, bool infinite, TimeSpan timeout, bool reply, Handle reply_target) {
         Handle object_handles[MaximumHandleCount];
         WaitableHolderBase *objects[MaximumHandleCount];
 
-        const size_t count = this->BuildHandleArray(object_handles, objects);
-        const u64 end_time = infinite ? U64_MAX : armTicksToNs(armGetSystemTick());
+        const s32 count = this->BuildHandleArray(object_handles, objects, MaximumHandleCount);
+        const TimeSpan end_time = infinite ? TimeSpan::FromNanoSeconds(std::numeric_limits<s64>::max()) : GetCurrentTick().ToTimeSpan() + timeout;
 
         while (true) {
-            this->current_time = armTicksToNs(armGetSystemTick());
+            this->current_time = GetCurrentTick().ToTimeSpan();
 
-            u64 min_timeout = 0;
+            TimeSpan min_timeout = 0;
             WaitableHolderBase *min_timeout_object = this->RecalculateNextTimeout(&min_timeout, end_time);
 
-            s32 index;
-            if (count == 0 && min_timeout == 0) {
-                index = WaitTimedOut;
+            s32 index = WaitInvalid;
+            Result wait_result = ResultSuccess();
+            if (reply) {
+                if (infinite && min_timeout_object == nullptr) {
+                    wait_result = this->target_impl.ReplyAndReceive(std::addressof(index), object_handles, MaximumHandleCount, count, reply_target);
+                } else {
+                    wait_result = this->target_impl.TimedReplyAndReceive(std::addressof(index), object_handles, MaximumHandleCount, count, reply_target, min_timeout);
+                }
+            } else if (infinite && min_timeout_object == nullptr) {
+                wait_result = this->target_impl.WaitAny(std::addressof(index), object_handles, MaximumHandleCount, count);
             } else {
-                index = this->WaitSynchronization(object_handles, count, min_timeout);
-                AMS_ABORT_UNLESS(index != WaitInvalid);
+                if (count == 0 && min_timeout == 0) {
+                    index = WaitTimedOut;
+                } else {
+                    wait_result = this->target_impl.TimedWaitAny(std::addressof(index), object_handles, MaximumHandleCount, count, min_timeout);
+                    AMS_ABORT_UNLESS(index != WaitInvalid);
+                }
+            }
+
+            if (index == WaitInvalid) {
+                *out = nullptr;
+                return wait_result;
             }
 
             switch (index) {
                 case WaitTimedOut:
                     if (min_timeout_object) {
-                        this->current_time = armTicksToNs(armGetSystemTick());
+                        this->current_time = GetCurrentTick().ToTimeSpan();
                         if (min_timeout_object->IsSignaled() == TriBool::True) {
-                            std::scoped_lock lk(this->lock);
+                            std::scoped_lock lk(this->cs_wait);
                             this->signaled_holder = min_timeout_object;
-                            return this->signaled_holder;
+                            *out                  = min_timeout_object;
+                            return wait_result;
                         }
-                        continue;
+                    } else {
+                        *out = nullptr;
+                        return wait_result;
                     }
-                    return nullptr;
+                    break;
                 case WaitCancelled:
-                    if (this->signaled_holder) {
-                        return this->signaled_holder;
+                    {
+                        std::scoped_lock lk(this->cs_wait);
+                        if (this->signaled_holder) {
+                            *out = this->signaled_holder;
+                            return wait_result;
+                        }
                     }
-                    continue;
+                    break;
                 default: /* 0 - 0x3F, valid. */
                     {
-                        std::scoped_lock lk(this->lock);
+                        AMS_ASSERT(0 <= index && index < static_cast<s32>(MaximumHandleCount));
+
+                        std::scoped_lock lk(this->cs_wait);
                         this->signaled_holder = objects[index];
-                        return this->signaled_holder;
+                        *out                  = objects[index];
+                        return wait_result;
                     }
             }
+
+            reply_target = svc::InvalidHandle;
         }
     }
 
-    s32 WaitableManagerImpl::WaitSynchronization(Handle *handles, size_t count, u64 timeout) {
-        s32 index = WaitInvalid;
-
-        R_TRY_CATCH(svcWaitSynchronization(&index, handles, count, timeout)) {
-            R_CATCH(svc::ResultTimedOut)  { return WaitTimedOut; }
-            R_CATCH(svc::ResultCancelled) { return WaitCancelled; }
-            /* All other results are critical errors. */
-            /* svc::ResultThreadTerminating */
-            /* svc::ResultInvalidHandle. */
-            /* svc::ResultInvalidPointer */
-            /* svc::ResultOutOfRange */
-        } R_END_TRY_CATCH_WITH_ABORT_UNLESS;
-
-        return index;
-    }
-
-    size_t WaitableManagerImpl::BuildHandleArray(Handle *out_handles, WaitableHolderBase **out_objects) {
-        size_t count = 0;
+    s32 WaitableManagerImpl::BuildHandleArray(Handle out_handles[], WaitableHolderBase *out_objects[], s32 num) {
+        s32 count = 0;
 
         for (WaitableHolderBase &holder_base : this->waitable_list) {
-            if (Handle handle = holder_base.GetHandle(); handle != INVALID_HANDLE) {
-                AMS_ABORT_UNLESS(count < MaximumHandleCount);
+            if (Handle handle = holder_base.GetHandle(); handle != svc::InvalidHandle) {
+                AMS_ASSERT(count < num);
 
                 out_handles[count] = handle;
                 out_objects[count] = &holder_base;
@@ -146,12 +171,12 @@ namespace ams::os::impl{
         }
     }
 
-    WaitableHolderBase *WaitableManagerImpl::RecalculateNextTimeout(u64 *out_min_timeout, u64 end_time) {
+    WaitableHolderBase *WaitableManagerImpl::RecalculateNextTimeout(TimeSpan *out_min_timeout, TimeSpan end_time) {
         WaitableHolderBase *min_timeout_holder = nullptr;
-        u64 min_time = end_time;
+        TimeSpan min_time = end_time;
 
         for (WaitableHolderBase &holder_base : this->waitable_list) {
-            if (const u64 cur_time = holder_base.GetWakeupTime(); cur_time < min_time) {
+            if (const TimeSpan cur_time = holder_base.GetAbsoluteWakeupTime(); cur_time < min_time) {
                 min_timeout_holder = &holder_base;
                 min_time = cur_time;
             }
@@ -166,11 +191,11 @@ namespace ams::os::impl{
     }
 
     void WaitableManagerImpl::SignalAndWakeupThread(WaitableHolderBase *holder_base) {
-        std::scoped_lock lk(this->lock);
+        std::scoped_lock lk(this->cs_wait);
 
         if (this->signaled_holder == nullptr) {
             this->signaled_holder = holder_base;
-            R_ABORT_UNLESS(svcCancelSynchronization(this->waiting_thread_handle));
+            this->target_impl.CancelWait();
         }
     }
 
